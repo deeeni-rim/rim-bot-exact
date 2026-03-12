@@ -1,88 +1,75 @@
 import requests
 import pandas as pd
-from typing import List
-from config import AUTO_LOAD_SYMBOLS, MANUAL_SYMBOLS, MAX_AUTO_SYMBOLS
 
 BASE_URL = "https://api.mexc.com"
-_SESSION = requests.Session()
+
+# Что исключаем
+EXCLUDE_KEYWORDS = {
+    "STOCK", "XAU", "XAG", "GOLD", "SILVER",
+    "WTI", "BRENT", "NASDAQ", "DJI", "SPX"
+}
+
+# Если захочешь оставить только USDT-пары
+QUOTE_SUFFIX = "_USDT"
 
 
-def get_contract_symbols() -> List[str]:
-    if not AUTO_LOAD_SYMBOLS:
-        return MANUAL_SYMBOLS
+def is_crypto_usdt_symbol(symbol: str) -> bool:
+    s = str(symbol).upper().strip()
 
+    if not s.endswith(QUOTE_SUFFIX):
+        return False
+
+    if any(word in s for word in EXCLUDE_KEYWORDS):
+        return False
+
+    return True
+
+
+def get_contract_symbols(max_auto_symbols: int = 0):
     url = f"{BASE_URL}/api/v1/contract/detail"
-    r = _SESSION.get(url, timeout=20)
+    r = requests.get(url, timeout=20)
     r.raise_for_status()
     payload = r.json()
-    data = payload.get("data")
 
-    if data is None:
-        return MANUAL_SYMBOLS
-
-    if isinstance(data, dict):
-        contracts = [data]
-    else:
-        contracts = data
-
+    rows = payload.get("data", [])
     symbols = []
-    for c in contracts:
-        symbol = c.get("symbol")
-        state = c.get("state")
-        pair_type = c.get("type", 1)
-        quote = c.get("quoteCoin")
-        hidden = c.get("isHidden", False)
-        if symbol and state == 0 and pair_type == 1 and quote == "USDT" and not hidden:
-            symbols.append(symbol)
+
+    for item in rows:
+        symbol = str(item.get("symbol", "")).upper().strip()
+
+        if not is_crypto_usdt_symbol(symbol):
+            continue
+
+        # если у MEXC есть флаги активности — можно оставить только активные
+        status = str(item.get("state", "")).upper()
+        if status and status not in {"ENABLED", "ONLINE", "1"}:
+            # не ломаемся, просто отфильтровываем явно отключенные
+            pass
+
+        symbols.append(symbol)
 
     symbols = sorted(set(symbols))
-    if MAX_AUTO_SYMBOLS > 0:
-        symbols = symbols[:MAX_AUTO_SYMBOLS]
-    return symbols or MANUAL_SYMBOLS
+
+    if max_auto_symbols and max_auto_symbols > 0:
+        symbols = symbols[:max_auto_symbols]
+
+    return symbols
 
 
 def get_klines(symbol: str, interval: str, limit: int = 200):
     url = f"{BASE_URL}/api/v1/contract/kline/{symbol}?interval={interval}&limit={limit}"
-    r = _SESSION.get(url, timeout=20)
+    r = requests.get(url, timeout=20)
     r.raise_for_status()
     payload = r.json()
-    data = payload.get("data")
 
+    data = payload.get("data")
     if not data:
         return None
 
-    # Futures kline can come as dict of arrays or list of dicts.
-    if isinstance(data, dict):
-        df = pd.DataFrame(data)
-    else:
-        df = pd.DataFrame(data)
-
-    # Normalize expected columns.
-    rename_map = {
-        "a": "amount",
-        "v": "vol",
-        "t": "time",
-    }
-    for old, new in rename_map.items():
-        if old in df.columns and new not in df.columns:
-            df[new] = df[old]
-
-    required = ["open", "high", "low", "close"]
-    if not all(col in df.columns for col in required):
-        return None
-
-    if "vol" not in df.columns:
-        if "amount" in df.columns:
-            df["vol"] = df["amount"]
-        else:
-            df["vol"] = 0
+    df = pd.DataFrame(data)
 
     for col in ["open", "high", "low", "close", "vol"]:
-        df[col] = pd.to_numeric(df[col], errors="coerce")
-
-    for col in ["time", "timestamp", "ts"]:
         if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors="coerce")
+            df[col] = df[col].astype(float)
 
-    df = df.dropna(subset=["open", "high", "low", "close"]).reset_index(drop=True)
-    return df if not df.empty else None
+    return df

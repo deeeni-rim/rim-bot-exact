@@ -8,29 +8,28 @@ SCAN_TIMEFRAME = os.getenv("SCAN_TIMEFRAME", "Min5")
 # ТФ фильтра тренда
 FILTER_TIMEFRAME = "Min60"
 
-# Пауза между циклами сканирования
+# Пауза между циклами
 SCAN_SLEEP_SECONDS = 20
 
-# Автозагрузка монет с MEXC
+# Автозагрузка всех символов
 AUTO_LOAD_SYMBOLS = True
 
-# Если AUTO_LOAD_SYMBOLS = False, используется этот список
+# Если выключишь автозагрузку
 MANUAL_SYMBOLS = [
     "BTC_USDT",
     "ETH_USDT",
 ]
 
-# Сколько монет максимум грузить автоматически
-MAX_AUTO_SYMBOLS = 50
+# Поставь с запасом
+MAX_AUTO_SYMBOLS = 1000
 
-# Скрытые настройки стратегии — как в индикаторе
+# Скрытые настройки
 EMA_LEN = 50
 IMPULSE_LOOKBACK_H = 12
 IMPULSE_MIN_PCT = 0.3
 USE_VOL_FILTER = True
 VOL_MA_LEN = 20
 
-# Настройки по умолчанию для пользователя
 DEFAULT_SETTINGS = {
     "enable_long": 1,
     "enable_short": 1,
