@@ -153,7 +153,13 @@ def _impulse_pct(df_1h: pd.DataFrame) -> Optional[float]:
 
 
 def compute_bar_signal(df_scan: pd.DataFrame, df_1h: pd.DataFrame, user: dict) -> tuple[Optional[Signal], Optional[Signal]]:
-    if len(df_scan) < user["structure_sensitivity"] * 2 + 5 or len(df_1h) < max(EMA_LEN, VOL_MA_LEN, IMPULSE_LOOKBACK_H):
+    # Нужен запас баров, потому что работаем только по закрытым свечам:
+    # scan: используем -2 и -3
+    # 1h:  используем -2
+    if (
+        len(df_scan) < user["structure_sensitivity"] * 2 + 6
+        or len(df_1h) < max(EMA_LEN, VOL_MA_LEN, IMPULSE_LOOKBACK_H) + 2
+    ):
         return None, None
 
     sens = int(user["structure_sensitivity"])
@@ -163,13 +169,14 @@ def compute_bar_signal(df_scan: pd.DataFrame, df_1h: pd.DataFrame, user: dict) -
     stop_buffer_pct = float(user["stop_buffer_pct"])
     tp_rr = float(user["tp_rr"])
 
-    close_now = float(df_scan["close"].iloc[-1])
-    close_prev = float(df_scan["close"].iloc[-2])
+    # Работаем только по ЗАКРЫТЫМ свечам
+    close_now = float(df_scan["close"].iloc[-2])   # последняя закрытая 5m свеча
+    close_prev = float(df_scan["close"].iloc[-3])  # предыдущая закрытая 5m свеча
 
-    fh_close = float(df_1h["close"].iloc[-1])
-    fh_ema = float(_ema(df_1h["close"], EMA_LEN).iloc[-1])
-    fh_vol = float(df_1h["vol"].iloc[-1]) if "vol" in df_1h.columns else 0.0
-    fh_vol_ma = float(_sma(df_1h["vol"], VOL_MA_LEN).iloc[-1]) if "vol" in df_1h.columns else 0.0
+    fh_close = float(df_1h["close"].iloc[-2])  # последняя закрытая 1h свеча
+    fh_ema = float(_ema(df_1h["close"], EMA_LEN).iloc[-2])
+    fh_vol = float(df_1h["vol"].iloc[-2]) if "vol" in df_1h.columns else 0.0
+    fh_vol_ma = float(_sma(df_1h["vol"], VOL_MA_LEN).iloc[-2]) if "vol" in df_1h.columns else 0.0
 
     impulse_pct = _impulse_pct(df_1h)
     if impulse_pct is None:
@@ -238,8 +245,9 @@ def update_trade_state_for_bar(trade_state: TradeState, df_scan: pd.DataFrame):
     if not trade_state.in_trade:
         return
 
-    bar_high = float(df_scan["high"].iloc[-1])
-    bar_low = float(df_scan["low"].iloc[-1])
+    # Проверяем стоп/тейк только по последней закрытой 5m свече
+    bar_high = float(df_scan["high"].iloc[-2])
+    bar_low = float(df_scan["low"].iloc[-2])
 
     long_stop_hit = trade_state.in_trade and trade_state.trade_dir == 1 and bar_low <= trade_state.stop
     long_tp_hit = trade_state.in_trade and trade_state.trade_dir == 1 and bar_high >= trade_state.tp
