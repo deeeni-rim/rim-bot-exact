@@ -31,7 +31,7 @@ def _render_profile(u: dict) -> str:
         f"Тейк: {u['tp_rr']}R\n"
         f"Буфер: {u['stop_buffer_pct']}%\n"
         f"Чувствительность: {u['structure_sensitivity']}\n"
-        f"Сигналы: {'включены' if u['is_active'] else 'выключены'}"
+        f"Сигналы: {'включены' if u['signals_enabled'] else 'выключены'}"
     )
 
 
@@ -154,7 +154,7 @@ async def handle_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data.startswith("set_sens_"):
         update_user_setting(user_id, "structure_sensitivity", int(data.replace("set_sens_", "")))
     elif data.startswith("set_active_"):
-        update_user_setting(user_id, "is_active", int(data.replace("set_active_", "")))
+        update_user_setting(user_id, "signals_enable", int(data.replace("set_active_", "")))
 
     u = get_user(user_id)
     await query.message.edit_text("Сохранено.\n\n" + _render_profile(u), reply_markup=main_menu())
