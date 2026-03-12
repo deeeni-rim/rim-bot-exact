@@ -159,15 +159,29 @@ def upsert_user_symbol_state(state: dict):
         conn.commit()
 
 def update_user_setting(user_id: int, key: str, value):
-    conn = get_conn()
-    with conn.cursor() as cur:
-        cur.execute(
-            """
-            INSERT INTO user_settings (user_id, key, value)
-            VALUES (%s, %s, %s)
-            ON CONFLICT (user_id, key)
-            DO UPDATE SET value = EXCLUDED.value
-            """,
-            (user_id, key, str(value))
-        )
-    conn.close()
+    allowed_fields = {
+        "enable_long",
+        "enable_short",
+        "max_stop_pct",
+        "tp_rr",
+        "stop_buffer_pct",
+        "structure_sensitivity",
+        "signals_enabled",
+        "username",
+    }
+
+    if key not in allowed_fields:
+        raise ValueError(f"Unsupported setting: {key}")
+
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                UPDATE users
+                SET {key} = %s,
+                    updated_at = NOW()
+                WHERE telegram_id = %s
+                """,
+                (value, user_id)
+            )
+        conn.commit()
