@@ -1,3 +1,4 @@
+import time
 import requests
 import pandas as pd
 
@@ -9,6 +10,16 @@ EXCLUDE_KEYWORDS = {
 }
 
 QUOTE_SUFFIX = "_USDT"
+
+# простой кэш в памяти
+_KLINES_CACHE = {}
+_SYMBOLS_CACHE = {
+    "ts": 0,
+    "data": []
+}
+
+KLINES_TTL_SEC = 20
+SYMBOLS_TTL_SEC = 60 * 30  # 30 минут
 
 
 def is_crypto_usdt_symbol(symbol: str) -> bool:
@@ -24,31 +35,46 @@ def is_crypto_usdt_symbol(symbol: str) -> bool:
 
 
 def get_contract_symbols(max_auto_symbols: int = 0):
-    url = f"{BASE_URL}/api/v1/contract/detail"
-    r = requests.get(url, timeout=20)
-    r.raise_for_status()
-    payload = r.json()
+    now = time.time()
 
-    rows = payload.get("data", [])
-    symbols = []
+    if _SYMBOLS_CACHE["data"] and (now - _SYMBOLS_CACHE["ts"] < SYMBOLS_TTL_SEC):
+        symbols = _SYMBOLS_CACHE["data"]
+    else:
+        url = f"{BASE_URL}/api/v1/contract/detail"
+        r = requests.get(url, timeout=20)
+        r.raise_for_status()
+        payload = r.json()
 
-    for item in rows:
-        symbol = str(item.get("symbol", "")).upper().strip()
+        rows = payload.get("data", [])
+        symbols = []
 
-        if not is_crypto_usdt_symbol(symbol):
-            continue
+        for item in rows:
+            symbol = str(item.get("symbol", "")).upper().strip()
 
-        symbols.append(symbol)
+            if not is_crypto_usdt_symbol(symbol):
+                continue
 
-    symbols = sorted(set(symbols))
+            symbols.append(symbol)
+
+        symbols = sorted(set(symbols))
+
+        _SYMBOLS_CACHE["ts"] = now
+        _SYMBOLS_CACHE["data"] = symbols
 
     if max_auto_symbols and max_auto_symbols > 0:
-        symbols = symbols[:max_auto_symbols]
+        return symbols[:max_auto_symbols]
 
     return symbols
 
 
 def get_klines(symbol: str, interval: str, limit: int = 150):
+    now = time.time()
+    cache_key = (symbol, interval, limit)
+
+    cached = _KLINES_CACHE.get(cache_key)
+    if cached and (now - cached["ts"] < KLINES_TTL_SEC):
+        return cached["df"]
+
     url = f"{BASE_URL}/api/v1/contract/kline/{symbol}?interval={interval}&limit={limit}"
     r = requests.get(url, timeout=20)
     r.raise_for_status()
@@ -63,5 +89,10 @@ def get_klines(symbol: str, interval: str, limit: int = 150):
     for col in ["open", "high", "low", "close", "vol"]:
         if col in df.columns:
             df[col] = df[col].astype(float)
+
+    _KLINES_CACHE[cache_key] = {
+        "ts": now,
+        "df": df
+    }
 
     return df

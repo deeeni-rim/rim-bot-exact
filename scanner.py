@@ -16,7 +16,8 @@ from strategy import process_user_symbol, state_from_db, state_to_db
 
 last_sent = defaultdict(dict)
 
-MAX_CONCURRENT_SYMBOLS = 20
+MAX_CONCURRENT_SYMBOLS = 15
+SYMBOLS_REFRESH_EVERY_CYCLES = 10
 
 
 def now_str():
@@ -105,14 +106,19 @@ async def scan_one_symbol(bot_app, symbol, users, semaphore):
 
 
 async def run_scanner(bot_app):
-    symbols = load_symbols()
-    print(f"[{now_str()}] Scanner started. Loaded {len(symbols)} crypto USDT symbols.")
-
     cycle_num = 0
     semaphore = asyncio.Semaphore(MAX_CONCURRENT_SYMBOLS)
+    symbols = load_symbols()
+
+    print(f"[{now_str()}] Scanner started. Loaded {len(symbols)} crypto USDT symbols.")
 
     while True:
         cycle_num += 1
+
+        if cycle_num == 1 or cycle_num % SYMBOLS_REFRESH_EVERY_CYCLES == 0:
+            symbols = load_symbols()
+            print(f"[{now_str()}] Symbols refreshed. Loaded {len(symbols)} crypto USDT symbols.")
+
         print(f"[{now_str()}] Scan cycle #{cycle_num} started.")
 
         users = get_all_active_users()
@@ -122,7 +128,6 @@ async def run_scanner(bot_app):
             scan_one_symbol(bot_app, symbol, users, semaphore)
             for symbol in symbols
         ]
-
         results = await asyncio.gather(*tasks, return_exceptions=False)
 
         checked_count = sum(r[0] for r in results)
