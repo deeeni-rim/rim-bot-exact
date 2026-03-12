@@ -153,12 +153,15 @@ def _impulse_pct(df_1h: pd.DataFrame) -> Optional[float]:
 
 
 def compute_bar_signal(df_scan: pd.DataFrame, df_1h: pd.DataFrame, user: dict) -> tuple[Optional[Signal], Optional[Signal]]:
-    # Нужен запас баров, потому что работаем только по закрытым свечам:
-    # scan: используем -2 и -3
-    # 1h:  используем -2
+    # 5m сигнал считаем только по закрытым свечам:
+    # close_now  = последняя закрытая 5m
+    # close_prev = предыдущая закрытая 5m
+    #
+    # 1h фильтр считаем как в TradingView request.security():
+    # берем текущее последнее значение 1h ряда
     if (
         len(df_scan) < user["structure_sensitivity"] * 2 + 6
-        or len(df_1h) < max(EMA_LEN, VOL_MA_LEN, IMPULSE_LOOKBACK_H) + 2
+        or len(df_1h) < max(EMA_LEN, VOL_MA_LEN, IMPULSE_LOOKBACK_H) + 1
     ):
         return None, None
 
@@ -169,14 +172,16 @@ def compute_bar_signal(df_scan: pd.DataFrame, df_1h: pd.DataFrame, user: dict) -
     stop_buffer_pct = float(user["stop_buffer_pct"])
     tp_rr = float(user["tp_rr"])
 
-    # Работаем только по ЗАКРЫТЫМ свечам
-    close_now = float(df_scan["close"].iloc[-2])   # последняя закрытая 5m свеча
-    close_prev = float(df_scan["close"].iloc[-3])  # предыдущая закрытая 5m свеча
+    # Только по закрытым 5m свечам
+    close_now = float(df_scan["close"].iloc[-2])
+    close_prev = float(df_scan["close"].iloc[-3])
 
-    fh_close = float(df_1h["close"].iloc[-2])  # последняя закрытая 1h свеча
-    fh_ema = float(_ema(df_1h["close"], EMA_LEN).iloc[-2])
-    fh_vol = float(df_1h["vol"].iloc[-2]) if "vol" in df_1h.columns else 0.0
-    fh_vol_ma = float(_sma(df_1h["vol"], VOL_MA_LEN).iloc[-2]) if "vol" in df_1h.columns else 0.0
+    # 1H фильтр как в Pine request.security(...)
+    fh_close = float(df_1h["close"].iloc[-1])
+    fh_ema = float(_ema(df_1h["close"], EMA_LEN).iloc[-1])
+
+    fh_vol = float(df_1h["vol"].iloc[-1]) if "vol" in df_1h.columns else 0.0
+    fh_vol_ma = float(_sma(df_1h["vol"], VOL_MA_LEN).iloc[-1]) if "vol" in df_1h.columns else 0.0
 
     impulse_pct = _impulse_pct(df_1h)
     if impulse_pct is None:
@@ -191,7 +196,8 @@ def compute_bar_signal(df_scan: pd.DataFrame, df_1h: pd.DataFrame, user: dict) -
     raw_buy = None
     if enable_long:
         long_trend_ok = fh_close > fh_ema
-        long_filter_ok = long_trend_ok and impulse_ok and vol_ok
+        long_filter_ok = enable_long and long_trend_ok and impulse_ok and vol_ok
+
         long_reclaim = (
             long_filter_ok
             and long_h is not None
@@ -199,10 +205,13 @@ def compute_bar_signal(df_scan: pd.DataFrame, df_1h: pd.DataFrame, user: dict) -
             and close_now > long_h
             and close_prev <= long_h
         )
+
         if long_reclaim:
             long_stop = long_l * (1.0 - stop_buffer_pct / 100.0)
             long_stop_dist_pct = ((close_now - long_stop) / close_now) * 100.0 if close_now != 0 else math.inf
-            if long_stop_dist_pct <= max_stop_pct:
+            long_stop_ok = long_stop_dist_pct <= max_stop_pct
+
+            if long_stop_ok:
                 long_tp = close_now + (close_now - long_stop) * tp_rr
                 raw_buy = Signal(
                     side="long",
@@ -216,7 +225,8 @@ def compute_bar_signal(df_scan: pd.DataFrame, df_1h: pd.DataFrame, user: dict) -
     raw_sell = None
     if enable_short:
         short_trend_ok = fh_close < fh_ema
-        short_filter_ok = short_trend_ok and impulse_ok and vol_ok
+        short_filter_ok = enable_short and short_trend_ok and impulse_ok and vol_ok
+
         short_breakdown = (
             short_filter_ok
             and short_h is not None
@@ -224,10 +234,13 @@ def compute_bar_signal(df_scan: pd.DataFrame, df_1h: pd.DataFrame, user: dict) -
             and close_now < short_l
             and close_prev >= short_l
         )
+
         if short_breakdown:
             short_stop = short_h * (1.0 + stop_buffer_pct / 100.0)
             short_stop_dist_pct = ((short_stop - close_now) / close_now) * 100.0 if close_now != 0 else math.inf
-            if short_stop_dist_pct <= max_stop_pct:
+            short_stop_ok = short_stop_dist_pct <= max_stop_pct
+
+            if short_stop_ok:
                 short_tp = close_now - (short_stop - close_now) * tp_rr
                 raw_sell = Signal(
                     side="short",
