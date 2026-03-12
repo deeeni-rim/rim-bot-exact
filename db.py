@@ -197,3 +197,34 @@ def log_signal(telegram_id: int, symbol: str, side: str, entry: float, stop: flo
             (telegram_id, symbol, side, entry, stop, tp, risk_pct, timeframe, signature),
         )
         conn.commit()
+
+def upsert_user_symbol_state(data: dict):
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+
+    cursor.execute("""
+        INSERT INTO user_symbol_state
+        (telegram_id, symbol, in_trade, trade_dir, entry, stop, tp, last_signature, last_bar_marker)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(telegram_id, symbol) DO UPDATE SET
+            in_trade = excluded.in_trade,
+            trade_dir = excluded.trade_dir,
+            entry = excluded.entry,
+            stop = excluded.stop,
+            tp = excluded.tp,
+            last_signature = excluded.last_signature,
+            last_bar_marker = excluded.last_bar_marker
+    """, (
+        data["telegram_id"],
+        data["symbol"],
+        data["in_trade"],
+        data["trade_dir"],
+        data["entry"],
+        data["stop"],
+        data["tp"],
+        data["last_signature"],
+        data["last_bar_marker"]
+    ))
+
+    conn.commit()
+    conn.close()
