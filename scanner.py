@@ -12,7 +12,7 @@ from config import (
 )
 from db import get_all_active_users
 from mexc_client import get_contract_symbols, get_klines
-from strategy import calc_signal
+from strategy import calculate_signal
 
 # защита от дублей
 last_sent = defaultdict(dict)
@@ -59,7 +59,7 @@ async def run_scanner(bot_app):
                 checked_count += 1
 
                 for user in users:
-                    signal = calc_signal(df_signal, df_filter, user)
+                    signal = calculate_signal(df_signal, df_filter, user)
                     if not signal:
                         continue
 
