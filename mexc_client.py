@@ -4,6 +4,11 @@ import pandas as pd
 
 BASE_URL = "https://api.mexc.com"
 
+SESSION = requests.Session()
+SESSION.headers.update({
+    "User-Agent": "rim-bot/1.0"
+})
+
 EXCLUDE_KEYWORDS = {
     "STOCK", "XAU", "XAG", "GOLD", "SILVER",
     "WTI", "BRENT", "NASDAQ", "DJI", "SPX"
@@ -11,7 +16,6 @@ EXCLUDE_KEYWORDS = {
 
 QUOTE_SUFFIX = "_USDT"
 
-# простой кэш в памяти
 _KLINES_CACHE = {}
 _SYMBOLS_CACHE = {
     "ts": 0,
@@ -19,7 +23,7 @@ _SYMBOLS_CACHE = {
 }
 
 KLINES_TTL_SEC = 20
-SYMBOLS_TTL_SEC = 60 * 30  # 30 минут
+SYMBOLS_TTL_SEC = 60 * 30
 
 
 def is_crypto_usdt_symbol(symbol: str) -> bool:
@@ -41,7 +45,7 @@ def get_contract_symbols(max_auto_symbols: int = 0):
         symbols = _SYMBOLS_CACHE["data"]
     else:
         url = f"{BASE_URL}/api/v1/contract/detail"
-        r = requests.get(url, timeout=20)
+        r = SESSION.get(url, timeout=20)
         r.raise_for_status()
         payload = r.json()
 
@@ -76,7 +80,7 @@ def get_klines(symbol: str, interval: str, limit: int = 150):
         return cached["df"]
 
     url = f"{BASE_URL}/api/v1/contract/kline/{symbol}?interval={interval}&limit={limit}"
-    r = requests.get(url, timeout=20)
+    r = SESSION.get(url, timeout=20)
     r.raise_for_status()
     payload = r.json()
 

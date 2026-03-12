@@ -16,7 +16,7 @@ from strategy import process_user_symbol, state_from_db, state_to_db
 
 last_sent = defaultdict(dict)
 
-MAX_CONCURRENT_SYMBOLS = 15
+MAX_CONCURRENT_SYMBOLS = 5
 SYMBOLS_REFRESH_EVERY_CYCLES = 10
 
 
@@ -36,8 +36,17 @@ def load_symbols():
 async def scan_one_symbol(bot, symbol, users, semaphore):
     async with semaphore:
         try:
-            df_scan = await asyncio.to_thread(get_klines, symbol, SCAN_TIMEFRAME, 150)
-            df_filter = await asyncio.to_thread(get_klines, symbol, FILTER_TIMEFRAME, 120)
+            try:
+                df_scan = await asyncio.to_thread(get_klines, symbol, SCAN_TIMEFRAME, 150)
+                df_filter = await asyncio.to_thread(get_klines, symbol, FILTER_TIMEFRAME, 120)
+            except Exception as e:
+                err = str(e)
+                if "403" in err:
+                    print(f"[{now_str()}] WAF 403 | {symbol} | backing off")
+                    await asyncio.sleep(2)
+                else:
+                    print(f"[{now_str()}] scanner error | {symbol} | {e}")
+                return 0, 0
 
             if df_scan is None or df_filter is None:
                 return 0, 0
@@ -128,6 +137,7 @@ async def run_scanner(bot):
             scan_one_symbol(bot, symbol, users, semaphore)
             for symbol in symbols
         ]
+
         results = await asyncio.gather(*tasks, return_exceptions=False)
 
         checked_count = sum(r[0] for r in results)
