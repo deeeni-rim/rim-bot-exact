@@ -278,3 +278,6 @@ def process_user_symbol(df_scan: pd.DataFrame, df_1h: pd.DataFrame, user: dict, 
         return raw_sell
 
     return None
+
+def calculate_signal(df_scan, df_1h, user, trade_state):
+    return process_user_symbol(df_scan, df_1h, user, trade_state)
