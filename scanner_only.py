@@ -19,5 +19,5 @@ async def main():
             await asyncio.sleep(10)
 
 
-if name == "__main__":
+if __name__ == "__main__":
     asyncio.run(main())
