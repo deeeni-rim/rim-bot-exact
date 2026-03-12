@@ -1,0 +1,16 @@
+services:
+  - type: worker
+    name: rim-bot-exact
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python app.py
+    plan: starter
+    envVars:
+      - key: BOT_TOKEN
+        sync: false
+      - key: SCAN_TIMEFRAME
+        value: Min5
+      - key: MAX_AUTO_SYMBOLS
+        value: "0"
+      - key: SCAN_SLEEP_SECONDS
+        value: "20"
