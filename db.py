@@ -157,3 +157,17 @@ def upsert_user_symbol_state(state: dict):
                 state.get("last_bar_marker"),
             ))
         conn.commit()
+
+def update_user_setting(user_id: int, key: str, value):
+    conn = get_conn()
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO user_settings (user_id, key, value)
+            VALUES (%s, %s, %s)
+            ON CONFLICT (user_id, key)
+            DO UPDATE SET value = EXCLUDED.value
+            """,
+            (user_id, key, str(value))
+        )
+    conn.close()
