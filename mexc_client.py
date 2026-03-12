@@ -56,7 +56,7 @@ def get_contract_symbols(max_auto_symbols: int = 0):
     return symbols
 
 
-def get_klines(symbol: str, interval: str, limit: int = 200):
+def get_klines(symbol: str, interval: str, limit: int = 150):
     url = f"{BASE_URL}/api/v1/contract/kline/{symbol}?interval={interval}&limit={limit}"
     r = requests.get(url, timeout=20)
     r.raise_for_status()
