@@ -21,7 +21,7 @@ MANUAL_SYMBOLS = [
 ]
 
 # Поставь с запасом
-MAX_AUTO_SYMBOLS = 100
+MAX_AUTO_SYMBOLS = 1000
 
 # Скрытые настройки
 EMA_LEN = 50

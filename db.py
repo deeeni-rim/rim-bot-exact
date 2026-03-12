@@ -1,205 +1,169 @@
 import sqlite3
-from contextlib import closing
-from config import DEFAULT_SETTINGS
+from typing import Optional
 
-DB_NAME = "users.db"
+DB_PATH = "users.db"
+
+
+DEFAULT_SETTINGS = {
+    "enable_long": 1,
+    "enable_short": 1,
+    "max_stop_pct": 3.0,
+    "tp_rr": 1.0,
+    "stop_buffer_pct": 1.0,
+    "structure_sensitivity": 3,
+    "is_active": 1,
+}
 
 
 def get_conn():
-    conn = sqlite3.connect(DB_NAME)
+    conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     return conn
 
 
 def init_db():
-    with closing(get_conn()) as conn:
-        cur = conn.cursor()
-        cur.execute(
-            """
-            CREATE TABLE IF NOT EXISTS users (
-                telegram_id INTEGER PRIMARY KEY,
-                username TEXT,
-                enable_long INTEGER NOT NULL,
-                enable_short INTEGER NOT NULL,
-                structure_sensitivity INTEGER NOT NULL,
-                max_stop_pct REAL NOT NULL,
-                stop_buffer_pct REAL NOT NULL,
-                tp_rr REAL NOT NULL,
-                is_active INTEGER NOT NULL
-            )
-            """
+    conn = get_conn()
+    cursor = conn.cursor()
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            telegram_id INTEGER PRIMARY KEY,
+            username TEXT,
+            enable_long INTEGER DEFAULT 1,
+            enable_short INTEGER DEFAULT 1,
+            max_stop_pct REAL DEFAULT 3.0,
+            tp_rr REAL DEFAULT 1.0,
+            stop_buffer_pct REAL DEFAULT 1.0,
+            structure_sensitivity INTEGER DEFAULT 3,
+            is_active INTEGER DEFAULT 1
         )
-        cur.execute(
-            """
-            CREATE TABLE IF NOT EXISTS user_symbol_state (
-                telegram_id INTEGER NOT NULL,
-                symbol TEXT NOT NULL,
-                in_trade INTEGER NOT NULL DEFAULT 0,
-                trade_dir INTEGER NOT NULL DEFAULT 0,
-                entry REAL,
-                stop REAL,
-                tp REAL,
-                last_signature TEXT,
-                last_bar_marker TEXT,
-                PRIMARY KEY (telegram_id, symbol)
-            )
-            """
+    """)
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS user_symbol_state (
+            telegram_id INTEGER NOT NULL,
+            symbol TEXT NOT NULL,
+            in_trade INTEGER DEFAULT 0,
+            trade_dir INTEGER DEFAULT 0,
+            entry REAL,
+            stop REAL,
+            tp REAL,
+            last_signature TEXT,
+            last_bar_marker TEXT,
+            PRIMARY KEY (telegram_id, symbol)
         )
-        cur.execute(
-            """
-            CREATE TABLE IF NOT EXISTS signal_log (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                telegram_id INTEGER NOT NULL,
-                symbol TEXT NOT NULL,
-                side TEXT NOT NULL,
-                entry REAL NOT NULL,
-                stop REAL NOT NULL,
-                tp REAL NOT NULL,
-                risk_pct REAL NOT NULL,
-                timeframe TEXT NOT NULL,
-                signature TEXT NOT NULL
-            )
-            """
-        )
-        conn.commit()
+    """)
+
+    conn.commit()
+    conn.close()
 
 
-def create_user_if_not_exists(telegram_id: int, username: str | None):
-    with closing(get_conn()) as conn:
-        cur = conn.cursor()
-        cur.execute("SELECT telegram_id FROM users WHERE telegram_id = ?", (telegram_id,))
-        row = cur.fetchone()
-        if not row:
-            cur.execute(
-                """
-                INSERT INTO users (
-                    telegram_id, username, enable_long, enable_short,
-                    structure_sensitivity, max_stop_pct, stop_buffer_pct,
-                    tp_rr, is_active
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    telegram_id,
-                    username,
-                    DEFAULT_SETTINGS["enable_long"],
-                    DEFAULT_SETTINGS["enable_short"],
-                    DEFAULT_SETTINGS["structure_sensitivity"],
-                    DEFAULT_SETTINGS["max_stop_pct"],
-                    DEFAULT_SETTINGS["stop_buffer_pct"],
-                    DEFAULT_SETTINGS["tp_rr"],
-                    DEFAULT_SETTINGS["is_active"],
-                ),
-            )
-            conn.commit()
+def create_user_if_not_exists(telegram_id: int, username: Optional[str] = None):
+    conn = get_conn()
+    cursor = conn.cursor()
 
+    cursor.execute("""
+        INSERT OR IGNORE INTO users
+        (telegram_id, username, enable_long, enable_short, max_stop_pct, tp_rr, stop_buffer_pct, structure_sensitivity, is_active)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, (
+        telegram_id,
+        username,
+        DEFAULT_SETTINGS["enable_long"],
+        DEFAULT_SETTINGS["enable_short"],
+        DEFAULT_SETTINGS["max_stop_pct"],
+        DEFAULT_SETTINGS["tp_rr"],
+        DEFAULT_SETTINGS["stop_buffer_pct"],
+        DEFAULT_SETTINGS["structure_sensitivity"],
+        DEFAULT_SETTINGS["is_active"],
+    ))
 
-def update_user_setting(telegram_id: int, field: str, value):
-    allowed = {
-        "enable_long",
-        "enable_short",
-        "structure_sensitivity",
-        "max_stop_pct",
-        "stop_buffer_pct",
-        "tp_rr",
-        "is_active",
-    }
-    if field not in allowed:
-        raise ValueError("Недопустимое поле")
+    if username is not None:
+        cursor.execute("""
+            UPDATE users
+            SET username = ?
+            WHERE telegram_id = ?
+        """, (username, telegram_id))
 
-    with closing(get_conn()) as conn:
-        cur = conn.cursor()
-        cur.execute(f"UPDATE users SET {field} = ? WHERE telegram_id = ?", (value, telegram_id))
-        conn.commit()
+    conn.commit()
+    conn.close()
 
 
 def get_user(telegram_id: int):
-    with closing(get_conn()) as conn:
-        cur = conn.cursor()
-        cur.execute("SELECT * FROM users WHERE telegram_id = ?", (telegram_id,))
-        row = cur.fetchone()
-        return dict(row) if row else None
+    conn = get_conn()
+    cursor = conn.cursor()
+
+    cursor.execute("""
+        SELECT *
+        FROM users
+        WHERE telegram_id = ?
+    """, (telegram_id,))
+
+    row = cursor.fetchone()
+    conn.close()
+
+    return dict(row) if row else None
+
+
+def update_user_setting(telegram_id: int, field_name: str, value):
+    allowed_fields = {
+        "enable_long",
+        "enable_short",
+        "max_stop_pct",
+        "tp_rr",
+        "stop_buffer_pct",
+        "structure_sensitivity",
+        "is_active",
+        "username",
+    }
+
+    if field_name not in allowed_fields:
+        raise ValueError(f"Unsupported field: {field_name}")
+
+    conn = get_conn()
+    cursor = conn.cursor()
+
+    query = f"UPDATE users SET {field_name} = ? WHERE telegram_id = ?"
+    cursor.execute(query, (value, telegram_id))
+
+    conn.commit()
+    conn.close()
 
 
 def get_all_active_users():
-    with closing(get_conn()) as conn:
-        cur = conn.cursor()
-        cur.execute("SELECT * FROM users WHERE is_active = 1")
-        rows = cur.fetchall()
-        return [dict(r) for r in rows]
+    conn = get_conn()
+    cursor = conn.cursor()
+
+    cursor.execute("""
+        SELECT *
+        FROM users
+        WHERE is_active = 1
+    """)
+
+    rows = cursor.fetchall()
+    conn.close()
+
+    return [dict(row) for row in rows]
 
 
 def get_user_symbol_state(telegram_id: int, symbol: str):
-    with closing(get_conn()) as conn:
-        cur = conn.cursor()
-        cur.execute(
-            "SELECT * FROM user_symbol_state WHERE telegram_id = ? AND symbol = ?",
-            (telegram_id, symbol),
-        )
-        row = cur.fetchone()
-        if row:
-            return dict(row)
-        return {
-            "telegram_id": telegram_id,
-            "symbol": symbol,
-            "in_trade": 0,
-            "trade_dir": 0,
-            "entry": None,
-            "stop": None,
-            "tp": None,
-            "last_signature": None,
-            "last_bar_marker": None,
-        }
+    conn = get_conn()
+    cursor = conn.cursor()
 
+    cursor.execute("""
+        SELECT telegram_id, symbol, in_trade, trade_dir, entry, stop, tp, last_signature, last_bar_marker
+        FROM user_symbol_state
+        WHERE telegram_id = ? AND symbol = ?
+    """, (telegram_id, symbol))
 
-def save_user_symbol_state(state: dict):
-    with closing(get_conn()) as conn:
-        cur = conn.cursor()
-        cur.execute(
-            """
-            INSERT INTO user_symbol_state (
-                telegram_id, symbol, in_trade, trade_dir, entry, stop, tp,
-                last_signature, last_bar_marker
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(telegram_id, symbol) DO UPDATE SET
-                in_trade=excluded.in_trade,
-                trade_dir=excluded.trade_dir,
-                entry=excluded.entry,
-                stop=excluded.stop,
-                tp=excluded.tp,
-                last_signature=excluded.last_signature,
-                last_bar_marker=excluded.last_bar_marker
-            """,
-            (
-                state["telegram_id"],
-                state["symbol"],
-                int(state.get("in_trade", 0)),
-                int(state.get("trade_dir", 0)),
-                state.get("entry"),
-                state.get("stop"),
-                state.get("tp"),
-                state.get("last_signature"),
-                str(state.get("last_bar_marker")) if state.get("last_bar_marker") is not None else None,
-            ),
-        )
-        conn.commit()
+    row = cursor.fetchone()
+    conn.close()
 
+    return dict(row) if row else None
 
-def log_signal(telegram_id: int, symbol: str, side: str, entry: float, stop: float, tp: float, risk_pct: float, timeframe: str, signature: str):
-    with closing(get_conn()) as conn:
-        cur = conn.cursor()
-        cur.execute(
-            """
-            INSERT INTO signal_log (
-                telegram_id, symbol, side, entry, stop, tp, risk_pct, timeframe, signature
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (telegram_id, symbol, side, entry, stop, tp, risk_pct, timeframe, signature),
-        )
-        conn.commit()
 
 def upsert_user_symbol_state(data: dict):
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_conn()
     cursor = conn.cursor()
 
     cursor.execute("""
@@ -217,13 +181,13 @@ def upsert_user_symbol_state(data: dict):
     """, (
         data["telegram_id"],
         data["symbol"],
-        data["in_trade"],
-        data["trade_dir"],
-        data["entry"],
-        data["stop"],
-        data["tp"],
-        data["last_signature"],
-        data["last_bar_marker"]
+        data.get("in_trade", 0),
+        data.get("trade_dir", 0),
+        data.get("entry"),
+        data.get("stop"),
+        data.get("tp"),
+        data.get("last_signature"),
+        data.get("last_bar_marker"),
     ))
 
     conn.commit()

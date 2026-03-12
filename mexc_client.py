@@ -3,13 +3,11 @@ import pandas as pd
 
 BASE_URL = "https://api.mexc.com"
 
-# Что исключаем
 EXCLUDE_KEYWORDS = {
     "STOCK", "XAU", "XAG", "GOLD", "SILVER",
     "WTI", "BRENT", "NASDAQ", "DJI", "SPX"
 }
 
-# Если захочешь оставить только USDT-пары
 QUOTE_SUFFIX = "_USDT"
 
 
@@ -39,12 +37,6 @@ def get_contract_symbols(max_auto_symbols: int = 0):
 
         if not is_crypto_usdt_symbol(symbol):
             continue
-
-        # если у MEXC есть флаги активности — можно оставить только активные
-        status = str(item.get("state", "")).upper()
-        if status and status not in {"ENABLED", "ONLINE", "1"}:
-            # не ломаемся, просто отфильтровываем явно отключенные
-            pass
 
         symbols.append(symbol)
 
