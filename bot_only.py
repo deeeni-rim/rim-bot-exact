@@ -5,23 +5,21 @@ from bot import build_bot_app
 
 async def main():
     init_db()
+    bot_app = build_bot_app()
 
-    while True:
-        try:
-            bot_app = build_bot_app()
+    await bot_app.initialize()
+    await bot_app.start()
+    await bot_app.updater.start_polling(drop_pending_updates=True)
 
-            await bot_app.initialize()
-            await bot_app.start()
-            await bot_app.updater.start_polling()
+    print("Bot service started.")
 
-            print("Bot service started.")
-
-            while True:
-                await asyncio.sleep(3600)
-
-        except Exception as e:
-            print(f"FATAL bot loop error: {e}")
-            await asyncio.sleep(10)
+    try:
+        while True:
+            await asyncio.sleep(3600)
+    finally:
+        await bot_app.updater.stop()
+        await bot_app.stop()
+        await bot_app.shutdown()
 
 
 if __name__ == "__main__":
