@@ -16,7 +16,7 @@ from strategy import process_user_symbol, state_from_db, state_to_db
 
 last_sent = defaultdict(dict)
 
-MAX_CONCURRENT_SYMBOLS = 5
+MAX_CONCURRENT_SYMBOLS = 10
 SYMBOLS_REFRESH_EVERY_CYCLES = 10
 
 
@@ -120,15 +120,18 @@ async def run_scanner(bot):
     symbols = load_symbols()
 
     print(f"[{now_str()}] Scanner started. Loaded {len(symbols)} crypto USDT symbols.")
+    print(f"[{now_str()}] Max concurrent symbols: {MAX_CONCURRENT_SYMBOLS}")
 
     while True:
         cycle_num += 1
+        cycle_start = datetime.now()
 
         if cycle_num == 1 or cycle_num % SYMBOLS_REFRESH_EVERY_CYCLES == 0:
             symbols = load_symbols()
             print(f"[{now_str()}] Symbols refreshed. Loaded {len(symbols)} crypto USDT symbols.")
 
         print(f"[{now_str()}] Scan cycle #{cycle_num} started.")
+        print(f"[{now_str()}] Symbols in cycle: {len(symbols)}")
 
         users = get_all_active_users()
         print(f"[{now_str()}] Active users: {len(users)}")
@@ -142,10 +145,12 @@ async def run_scanner(bot):
 
         checked_count = sum(r[0] for r in results)
         sent_count = sum(r[1] for r in results)
+        cycle_time = (datetime.now() - cycle_start).total_seconds()
 
         print(
             f"[{now_str()}] Scan cycle #{cycle_num} finished. "
-            f"Checked symbols: {checked_count}. Sent signals: {sent_count}."
+            f"Checked symbols: {checked_count}. Sent signals: {sent_count}. "
+            f"Cycle time: {cycle_time:.2f}s"
         )
 
         await asyncio.sleep(SCAN_SLEEP_SECONDS)

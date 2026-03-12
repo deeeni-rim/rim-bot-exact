@@ -9,7 +9,7 @@ SCAN_TIMEFRAME = os.getenv("SCAN_TIMEFRAME", "Min5")
 FILTER_TIMEFRAME = "Min60"
 
 # Пауза между циклами
-SCAN_SLEEP_SECONDS = 240
+SCAN_SLEEP_SECONDS = 60
 
 # Автозагрузка всех символов
 AUTO_LOAD_SYMBOLS = True
