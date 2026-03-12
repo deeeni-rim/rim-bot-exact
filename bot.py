@@ -57,9 +57,9 @@ async def mysettings(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     try:
-    await query.answer()
-except Exception:
-    pass
+        await query.answer()
+    except Exception:
+        pass
 
     user_id = query.from_user.id
     data = query.data
