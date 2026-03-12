@@ -33,7 +33,7 @@ def load_symbols():
     return sorted(set(symbols))
 
 
-async def scan_one_symbol(bot_app, symbol, users, semaphore):
+async def scan_one_symbol(bot, symbol, users, semaphore):
     async with semaphore:
         try:
             df_scan = await asyncio.to_thread(get_klines, symbol, SCAN_TIMEFRAME, 150)
@@ -82,7 +82,7 @@ async def scan_one_symbol(bot_app, symbol, users, semaphore):
                 )
 
                 try:
-                    await bot_app.bot.send_message(
+                    await bot.send_message(
                         chat_id=user["telegram_id"],
                         text=text
                     )
@@ -105,7 +105,7 @@ async def scan_one_symbol(bot_app, symbol, users, semaphore):
             return 0, 0
 
 
-async def run_scanner(bot_app):
+async def run_scanner(bot):
     cycle_num = 0
     semaphore = asyncio.Semaphore(MAX_CONCURRENT_SYMBOLS)
     symbols = load_symbols()
@@ -125,7 +125,7 @@ async def run_scanner(bot_app):
         print(f"[{now_str()}] Active users: {len(users)}")
 
         tasks = [
-            scan_one_symbol(bot_app, symbol, users, semaphore)
+            scan_one_symbol(bot, symbol, users, semaphore)
             for symbol in symbols
         ]
         results = await asyncio.gather(*tasks, return_exceptions=False)
