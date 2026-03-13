@@ -173,6 +173,13 @@ def update_user_setting(user_id: int, key: str, value):
     if key not in allowed_fields:
         raise ValueError(f"Unsupported setting: {key}")
 
+    # Приводим boolean-поля к True/False
+    if key in {"enable_long", "enable_short", "signals_enabled"}:
+        if isinstance(value, str):
+            value = value.strip().lower() in {"1", "true", "yes", "on"}
+        else:
+            value = bool(value)
+
     with get_conn() as conn:
         with conn.cursor() as cur:
             cur.execute(
@@ -182,6 +189,6 @@ def update_user_setting(user_id: int, key: str, value):
                     updated_at = NOW()
                 WHERE telegram_id = %s
                 """,
-                (value, user_id)
+                (value, user_id),
             )
         conn.commit()

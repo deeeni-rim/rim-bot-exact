@@ -16,6 +16,7 @@ class Signal:
     tp: float
     risk_pct: float
     signature: tuple
+    bar_marker: str
 
 
 @dataclass
@@ -75,7 +76,6 @@ def _pivot_low_value(df: pd.DataFrame, idx: int, sens: int) -> Optional[float]:
     for j in range(1, sens + 1):
         if center >= float(df["low"].iloc[idx - j]) or center >= float(df["low"].iloc[idx + j]):
             return None
-
     return center
 
 
@@ -87,7 +87,6 @@ def _pivot_high_value(df: pd.DataFrame, idx: int, sens: int) -> Optional[float]:
     for j in range(1, sens + 1):
         if center <= float(df["high"].iloc[idx - j]) or center <= float(df["high"].iloc[idx + j]):
             return None
-
     return center
 
 
@@ -147,7 +146,7 @@ def _build_short_structure(df: pd.DataFrame, sens: int):
     return short_h, short_l
 
 
-def _impulse_pct(df_1h: pd.DataFrame) -> Optional[float]:
+def _impulse_pct_current_1h(df_1h: pd.DataFrame) -> Optional[float]:
     if len(df_1h) < IMPULSE_LOOKBACK_H:
         return None
 
@@ -161,15 +160,21 @@ def _impulse_pct(df_1h: pd.DataFrame) -> Optional[float]:
     return (hi - lo) / lo * 100.0
 
 
+def _prepare_closed_5m_view(df_scan: pd.DataFrame) -> Optional[pd.DataFrame]:
+    # Предполагаем, что последняя строка df_scan — текущая формирующаяся 5m свеча.
+    # Для точного повторения Pine на закрытии бара берём все данные ДО неё.
+    if len(df_scan) < 3:
+        return None
+    return df_scan.iloc[:-1].copy()
+
+
 def compute_bar_signal(
     df_scan: pd.DataFrame,
     df_1h: pd.DataFrame,
     user: dict,
 ) -> tuple[Optional[Signal], Optional[Signal]]:
-    if (
-        len(df_scan) < int(user["structure_sensitivity"]) * 2 + 6
-        or len(df_1h) < max(EMA_LEN, VOL_MA_LEN, IMPULSE_LOOKBACK_H) + 2
-    ):
+    work_scan = _prepare_closed_5m_view(df_scan)
+    if work_scan is None:
         return None, None
 
     sens = int(user["structure_sensitivity"])
@@ -179,33 +184,40 @@ def compute_bar_signal(
     stop_buffer_pct = float(user["stop_buffer_pct"])
     tp_rr = float(user["tp_rr"])
 
-    # Работаем только по закрытым свечам:
-    # -2 = последняя закрытая 5m/1h свеча
-    # -3 = предыдущая закрытая свеча
-    close_now = float(df_scan["close"].iloc[-2])
-    close_prev = float(df_scan["close"].iloc[-3])
+    if (
+        len(work_scan) < sens * 2 + 3
+        or len(df_1h) < max(EMA_LEN, VOL_MA_LEN, IMPULSE_LOOKBACK_H)
+    ):
+        return None, None
 
-    fh_close = float(df_1h["close"].iloc[-2])
-    fh_ema = float(_ema(df_1h["close"], EMA_LEN).iloc[-2])
+    # Pine на 5m сигнале использует текущую закрытую свечу и предыдущую.
+    close_now = float(work_scan["close"].iloc[-1])
+    close_prev = float(work_scan["close"].iloc[-2])
+    current_bar_marker = str(work_scan.index[-1])
+
+    # В Pine request.security(... close ...) без [1]:
+    # это текущая 1H свеча, а не последняя закрытая.
+    fh_close = float(df_1h["close"].iloc[-1])
+    fh_ema = float(_ema(df_1h["close"], EMA_LEN).iloc[-1])
 
     vol_col = "vol" if "vol" in df_1h.columns else "volume"
-    fh_vol = float(df_1h[vol_col].iloc[-2]) if vol_col in df_1h.columns else 0.0
-    fh_vol_ma = float(_sma(df_1h[vol_col], VOL_MA_LEN).iloc[-2]) if vol_col in df_1h.columns else 0.0
+    fh_vol = float(df_1h[vol_col].iloc[-1]) if vol_col in df_1h.columns else 0.0
+    fh_vol_ma = float(_sma(df_1h[vol_col], VOL_MA_LEN).iloc[-1]) if vol_col in df_1h.columns else 0.0
 
-    impulse_pct = _impulse_pct(df_1h)
+    impulse_pct = _impulse_pct_current_1h(df_1h)
     if impulse_pct is None:
         return None, None
 
     vol_ok = (not USE_VOL_FILTER) or (fh_vol > fh_vol_ma)
     impulse_ok = impulse_pct >= IMPULSE_MIN_PCT
 
-    long_l, long_h = _build_long_structure(df_scan, sens)
-    short_h, short_l = _build_short_structure(df_scan, sens)
+    long_l, long_h = _build_long_structure(work_scan, sens)
+    short_h, short_l = _build_short_structure(work_scan, sens)
 
     raw_buy = None
     if enable_long:
         long_trend_ok = fh_close > fh_ema
-        long_filter_ok = long_trend_ok and impulse_ok and vol_ok
+        long_filter_ok = enable_long and long_trend_ok and impulse_ok and vol_ok
 
         long_reclaim = (
             long_filter_ok
@@ -235,13 +247,15 @@ def compute_bar_signal(
                         round(close_now, 10),
                         round(long_stop, 10),
                         round(long_tp, 10),
+                        current_bar_marker,
                     ),
+                    bar_marker=current_bar_marker,
                 )
 
     raw_sell = None
     if enable_short:
         short_trend_ok = fh_close < fh_ema
-        short_filter_ok = short_trend_ok and impulse_ok and vol_ok
+        short_filter_ok = enable_short and short_trend_ok and impulse_ok and vol_ok
 
         short_breakdown = (
             short_filter_ok
@@ -271,25 +285,32 @@ def compute_bar_signal(
                         round(close_now, 10),
                         round(short_stop, 10),
                         round(short_tp, 10),
+                        current_bar_marker,
                     ),
+                    bar_marker=current_bar_marker,
                 )
 
     return raw_buy, raw_sell
 
 
 def update_trade_state_for_bar(trade_state: TradeState, df_scan: pd.DataFrame):
+    work_scan = _prepare_closed_5m_view(df_scan)
+    if work_scan is None:
+        return
+
     if not trade_state.in_trade:
         return
 
-    # Проверяем стоп/тейк только по последней закрытой 5m свече
-    bar_high = float(df_scan["high"].iloc[-2])
-    bar_low = float(df_scan["low"].iloc[-2])
+    # Pine проверяет high/low той же самой закрытой 5m свечи,
+    # на которой уже мог появиться новый сигнал.
+    bar_high = float(work_scan["high"].iloc[-1])
+    bar_low = float(work_scan["low"].iloc[-1])
 
-    long_stop_hit = trade_state.in_trade and trade_state.trade_dir == 1 and bar_low <= trade_state.stop
-    long_tp_hit = trade_state.in_trade and trade_state.trade_dir == 1 and bar_high >= trade_state.tp
+    long_stop_hit = trade_state.in_trade and trade_state.trade_dir == 1 and trade_state.stop is not None and bar_low <= trade_state.stop
+    long_tp_hit = trade_state.in_trade and trade_state.trade_dir == 1 and trade_state.tp is not None and bar_high >= trade_state.tp
 
-    short_stop_hit = trade_state.in_trade and trade_state.trade_dir == -1 and bar_high >= trade_state.stop
-    short_tp_hit = trade_state.in_trade and trade_state.trade_dir == -1 and bar_low <= trade_state.tp
+    short_stop_hit = trade_state.in_trade and trade_state.trade_dir == -1 and trade_state.stop is not None and bar_high >= trade_state.stop
+    short_tp_hit = trade_state.in_trade and trade_state.trade_dir == -1 and trade_state.tp is not None and bar_low <= trade_state.tp
 
     if long_stop_hit or long_tp_hit or short_stop_hit or short_tp_hit:
         trade_state.in_trade = False
@@ -300,39 +321,50 @@ def update_trade_state_for_bar(trade_state: TradeState, df_scan: pd.DataFrame):
 
 
 def process_user_symbol(df_scan: pd.DataFrame, df_1h: pd.DataFrame, user: dict, trade_state: TradeState):
-    update_trade_state_for_bar(trade_state, df_scan)
+    work_scan = _prepare_closed_5m_view(df_scan)
+    if work_scan is None:
+        return None
+
+    current_bar_marker = str(work_scan.index[-1])
 
     raw_buy, raw_sell = compute_bar_signal(df_scan, df_1h, user)
 
-    if raw_buy is not None and (not trade_state.in_trade or trade_state.trade_dir == 1):
+    # В Pine buy/sell блокируется состоянием сделки ДО exit-логики текущего бара.
+    buy_signal = raw_buy is not None and (not trade_state.in_trade or trade_state.trade_dir == 1)
+    sell_signal = raw_sell is not None and (not trade_state.in_trade or trade_state.trade_dir == -1)
+
+    emitted_signal = None
+
+    if buy_signal:
         sig_str = signature_to_str(raw_buy.signature)
-        if trade_state.last_signature == sig_str:
-            return None
+        if not (trade_state.last_bar_marker == current_bar_marker and trade_state.last_signature == sig_str):
+            # replace/open long exactly like Pine
+            trade_state.in_trade = True
+            trade_state.trade_dir = 1
+            trade_state.entry = raw_buy.entry
+            trade_state.stop = raw_buy.stop
+            trade_state.tp = raw_buy.tp
+            trade_state.last_signature = sig_str
+            trade_state.last_bar_marker = current_bar_marker
+            emitted_signal = raw_buy
 
-        trade_state.in_trade = True
-        trade_state.trade_dir = 1
-        trade_state.entry = raw_buy.entry
-        trade_state.stop = raw_buy.stop
-        trade_state.tp = raw_buy.tp
-        trade_state.last_signature = sig_str
-        trade_state.last_bar_marker = str(df_scan.index[-2])
-        return raw_buy
-
-    if raw_sell is not None and (not trade_state.in_trade or trade_state.trade_dir == -1):
+    elif sell_signal:
         sig_str = signature_to_str(raw_sell.signature)
-        if trade_state.last_signature == sig_str:
-            return None
+        if not (trade_state.last_bar_marker == current_bar_marker and trade_state.last_signature == sig_str):
+            # replace/open short exactly like Pine
+            trade_state.in_trade = True
+            trade_state.trade_dir = -1
+            trade_state.entry = raw_sell.entry
+            trade_state.stop = raw_sell.stop
+            trade_state.tp = raw_sell.tp
+            trade_state.last_signature = sig_str
+            trade_state.last_bar_marker = current_bar_marker
+            emitted_signal = raw_sell
 
-        trade_state.in_trade = True
-        trade_state.trade_dir = -1
-        trade_state.entry = raw_sell.entry
-        trade_state.stop = raw_sell.stop
-        trade_state.tp = raw_sell.tp
-        trade_state.last_signature = sig_str
-        trade_state.last_bar_marker = str(df_scan.index[-2])
-        return raw_sell
+    # ВАЖНО: exit идёт ПОСЛЕ open/replace, как в Pine
+    update_trade_state_for_bar(trade_state, df_scan)
 
-    return None
+    return emitted_signal
 
 
 def calculate_signal(df_scan, df_1h, user, trade_state):

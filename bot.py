@@ -17,33 +17,24 @@ def main_menu() -> InlineKeyboardMarkup:
     ])
 
 
-def _render_profile(u: dict | None) -> str:
-    u = u or {}
-
-    enable_long = bool(u.get("enable_long", True))
-    enable_short = bool(u.get("enable_short", True))
-    max_stop_pct = float(u.get("max_stop_pct", 5.0))
-    tp_rr = float(u.get("tp_rr", 1.0))
-    stop_buffer_pct = float(u.get("stop_buffer_pct", 1.0))
-    structure_sensitivity = int(u.get("structure_sensitivity", 2))
-    signals_enabled = bool(u.get("signals_enabled", True))
-
+def _render_profile(u: dict) -> str:
     mode = (
-        "лонг + шорт" if enable_long and enable_short
-        else "только лонг" if enable_long
-        else "только шорт" if enable_short
+        "лонг + шорт" if u["enable_long"] and u["enable_short"]
+        else "только лонг" if u["enable_long"]
+        else "только шорт" if u["enable_short"]
         else "выключено"
     )
 
     return (
-        "Твои настройки:\n\n"
+        f"Твои настройки:\n\n"
         f"Режим: {mode}\n"
-        f"Макс. стоп: {max_stop_pct}%\n"
-        f"Тейк RR: {tp_rr}R\n"
-        f"Буфер: {stop_buffer_pct}%\n"
-        f"Чувствительность: {structure_sensitivity}\n"
-        f"Сигналы: {'включены' if signals_enabled else 'выключены'}"
+        f"Макс. стоп: {u['max_stop_pct']}%\n"
+        f"Тейк RR: {u['tp_rr']}R\n"
+        f"Буфер стопа: {u['stop_buffer_pct']}%\n"
+        f"Чувствительность: {u['structure_sensitivity']}\n"
+        f"Сигналы: {'включены' if u['signals_enabled'] else 'выключены'}"
     )
+
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -146,16 +137,16 @@ async def handle_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if data == "set_mode_long":
-        update_user_setting(user_id, "enable_long", 1)
-        update_user_setting(user_id, "enable_short", 0)
+        update_user_setting(user_id, "enable_long", True)
+        update_user_setting(user_id, "enable_short", False)
 
     elif data == "set_mode_short":
-        update_user_setting(user_id, "enable_long", 0)
-        update_user_setting(user_id, "enable_short", 1)
+        update_user_setting(user_id, "enable_long", False)
+        update_user_setting(user_id, "enable_short", True)
 
     elif data == "set_mode_both":
-        update_user_setting(user_id, "enable_long", 1)
-        update_user_setting(user_id, "enable_short", 1)
+        update_user_setting(user_id, "enable_long", True)
+        update_user_setting(user_id, "enable_short", True)
 
     elif data.startswith("set_stop_"):
         update_user_setting(user_id, "max_stop_pct", float(data.replace("set_stop_", "")))
@@ -169,8 +160,11 @@ async def handle_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data.startswith("set_sens_"):
         update_user_setting(user_id, "structure_sensitivity", int(data.replace("set_sens_", "")))
 
-    elif data.startswith("set_active_"):
-        update_user_setting(user_id, "signals_enabled", int(data.replace("set_active_", "")))
+    elif data == "set_active_1":
+        update_user_setting(user_id, "signals_enabled", True)
+
+    elif data == "set_active_0":
+        update_user_setting(user_id, "signals_enabled", False)
 
     u = get_user(user_id)
     await query.message.edit_text("Сохранено.\n\n" + _render_profile(u), reply_markup=main_menu())
