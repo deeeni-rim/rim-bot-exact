@@ -1,5 +1,4 @@
 import os
-import json
 import psycopg2
 from psycopg2.extras import RealDictCursor
 
@@ -22,10 +21,10 @@ def init_db():
                     username TEXT,
                     enable_long BOOLEAN DEFAULT TRUE,
                     enable_short BOOLEAN DEFAULT TRUE,
-                    max_stop_pct DOUBLE PRECISION DEFAULT 5.0,
+                    max_stop_pct DOUBLE PRECISION DEFAULT 3.0,
                     tp_rr DOUBLE PRECISION DEFAULT 1.0,
                     stop_buffer_pct DOUBLE PRECISION DEFAULT 1.0,
-                    structure_sensitivity INTEGER DEFAULT 2,
+                    structure_sensitivity INTEGER DEFAULT 3,
                     signals_enabled BOOLEAN DEFAULT TRUE,
                     created_at TIMESTAMP DEFAULT NOW(),
                     updated_at TIMESTAMP DEFAULT NOW()
@@ -47,6 +46,13 @@ def init_db():
                     PRIMARY KEY (telegram_id, symbol)
                 )
             """)
+
+            # На случай старой базы: добавим колонку, если ее нет
+            cur.execute("""
+                ALTER TABLE users
+                ADD COLUMN IF NOT EXISTS signals_enabled BOOLEAN DEFAULT TRUE
+            """)
+
         conn.commit()
 
 
@@ -54,8 +60,18 @@ def create_user_if_not_exists(telegram_id: int, username: str | None):
     with get_conn() as conn:
         with conn.cursor() as cur:
             cur.execute("""
-                INSERT INTO users (telegram_id, username)
-                VALUES (%s, %s)
+                INSERT INTO users (
+                    telegram_id,
+                    username,
+                    enable_long,
+                    enable_short,
+                    max_stop_pct,
+                    tp_rr,
+                    stop_buffer_pct,
+                    structure_sensitivity,
+                    signals_enabled
+                )
+                VALUES (%s, %s, TRUE, TRUE, 3.0, 1.0, 1.0, 3, TRUE)
                 ON CONFLICT (telegram_id) DO NOTHING
             """, (telegram_id, username))
         conn.commit()
@@ -88,6 +104,12 @@ def update_user_field(telegram_id: int, field: str, value):
     if field not in allowed_fields:
         raise ValueError(f"Field {field} is not allowed")
 
+    if field in {"enable_long", "enable_short", "signals_enabled"}:
+        if isinstance(value, str):
+            value = value.strip().lower() in {"1", "true", "yes", "on"}
+        else:
+            value = bool(value)
+
     with get_conn() as conn:
         with conn.cursor() as cur:
             cur.execute(
@@ -98,6 +120,41 @@ def update_user_field(telegram_id: int, field: str, value):
                 WHERE telegram_id = %s
                 """,
                 (value, telegram_id)
+            )
+        conn.commit()
+
+
+def update_user_setting(user_id: int, key: str, value):
+    allowed_fields = {
+        "enable_long",
+        "enable_short",
+        "max_stop_pct",
+        "tp_rr",
+        "stop_buffer_pct",
+        "structure_sensitivity",
+        "signals_enabled",
+        "username",
+    }
+
+    if key not in allowed_fields:
+        raise ValueError(f"Unsupported setting: {key}")
+
+    if key in {"enable_long", "enable_short", "signals_enabled"}:
+        if isinstance(value, str):
+            value = value.strip().lower() in {"1", "true", "yes", "on"}
+        else:
+            value = bool(value)
+
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                UPDATE users
+                SET {key} = %s,
+                    updated_at = NOW()
+                WHERE telegram_id = %s
+                """,
+                (value, user_id),
             )
         conn.commit()
 
@@ -156,39 +213,4 @@ def upsert_user_symbol_state(state: dict):
                 state.get("last_signature"),
                 state.get("last_bar_marker"),
             ))
-        conn.commit()
-
-def update_user_setting(user_id: int, key: str, value):
-    allowed_fields = {
-        "enable_long",
-        "enable_short",
-        "max_stop_pct",
-        "tp_rr",
-        "stop_buffer_pct",
-        "structure_sensitivity",
-        "signals_enabled",
-        "username",
-    }
-
-    if key not in allowed_fields:
-        raise ValueError(f"Unsupported setting: {key}")
-
-    # Приводим boolean-поля к True/False
-    if key in {"enable_long", "enable_short", "signals_enabled"}:
-        if isinstance(value, str):
-            value = value.strip().lower() in {"1", "true", "yes", "on"}
-        else:
-            value = bool(value)
-
-    with get_conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                f"""
-                UPDATE users
-                SET {key} = %s,
-                    updated_at = NOW()
-                WHERE telegram_id = %s
-                """,
-                (value, user_id),
-            )
         conn.commit()
