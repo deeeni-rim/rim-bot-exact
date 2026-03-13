@@ -1,5 +1,5 @@
 import asyncio
-from collections import defaultdict
+import time
 from datetime import datetime
 
 from config import (
@@ -14,10 +14,11 @@ from db import get_all_active_users, get_user_symbol_state, upsert_user_symbol_s
 from mexc_client import get_contract_symbols, get_klines
 from strategy import process_user_symbol, state_from_db, state_to_db
 
-last_sent = defaultdict(dict)
 
-MAX_CONCURRENT_SYMBOLS = 10
+MAX_CONCURRENT_SYMBOLS = 8
 SYMBOLS_REFRESH_EVERY_CYCLES = 10
+
+last_sent = {}
 
 
 def now_str():
@@ -33,27 +34,55 @@ def load_symbols():
     return sorted(set(symbols))
 
 
-async def scan_one_symbol(bot, symbol, users, semaphore):
+async def _get_klines_retry(symbol: str, interval: str, limit: int):
+    delay = 0.8
+    last_error = None
+
+    for attempt in range(3):
+        try:
+            df = await asyncio.to_thread(get_klines, symbol, interval, limit)
+            if df is None or len(df) == 0:
+                raise RuntimeError("empty dataframe")
+            return df
+        except Exception as e:
+            last_error = e
+            err = str(e)
+
+            if attempt < 2:
+                if "403" in err:
+                    print(
+                        f"[{now_str()}] WAF 403 | {symbol} | {interval} | retry {attempt + 1}/3",
+                        flush=True,
+                    )
+                else:
+                    print(
+                        f"[{now_str()}] get_klines retry | {symbol} | {interval} | {e}",
+                        flush=True,
+                    )
+                await asyncio.sleep(delay)
+                delay *= 2
+            else:
+                raise last_error
+
+
+async def scan_one_symbol(symbol, users, semaphore: asyncio.Semaphore, send_queue: asyncio.Queue):
     async with semaphore:
         try:
+            df_scan, df_filter = await asyncio.gather(
+                _get_klines_retry(symbol, SCAN_TIMEFRAME, 150),
+                _get_klines_retry(symbol, FILTER_TIMEFRAME, 120),
+            )
+        except Exception as e:
+            print(f"[{now_str()}] scanner error | {symbol} | {e}", flush=True)
+            return 0, 0
+
+        if df_scan is None or df_filter is None:
+            return 0, 0
+
+        queued_count = 0
+
+        for user in users:
             try:
-                df_scan = await asyncio.to_thread(get_klines, symbol, SCAN_TIMEFRAME, 150)
-                df_filter = await asyncio.to_thread(get_klines, symbol, FILTER_TIMEFRAME, 120)
-            except Exception as e:
-                err = str(e)
-                if "403" in err:
-                    print(f"[{now_str()}] WAF 403 | {symbol} | backing off")
-                    await asyncio.sleep(2)
-                else:
-                    print(f"[{now_str()}] scanner error | {symbol} | {e}")
-                return 0, 0
-
-            if df_scan is None or df_filter is None:
-                return 0, 0
-
-            sent_count = 0
-
-            for user in users:
                 trade_row = get_user_symbol_state(user["telegram_id"], symbol)
                 trade_state = state_from_db(trade_row or {})
 
@@ -85,72 +114,88 @@ async def scan_one_symbol(bot, symbol, users, semaphore):
                 )
 
                 print(
-                    f"[{now_str()}] SIGNAL {signal.side.upper()} | "
-                    f"{symbol} | user={user['telegram_id']} | "
-                    f"entry={signal.entry:.8f} | stop={signal.stop:.8f}"
+                    f"[{now_str()}] SIGNAL {signal.side.upper()} | {symbol} | "
+                    f"user={user['telegram_id']} | entry={signal.entry:.8f} | stop={signal.stop:.8f}",
+                    flush=True,
                 )
 
-                try:
-                    await bot.send_message(
-                        chat_id=user["telegram_id"],
-                        text=text
-                    )
-                except Exception as e:
-                    print(f"[{now_str()}] send_message error | user={user['telegram_id']} | {symbol} | {e}")
-                    continue
-
-                print(
-                    f"[{now_str()}] SENT to user={user['telegram_id']} | "
-                    f"{symbol} | {signal.side.upper()}"
+                await send_queue.put(
+                    (user["telegram_id"], text, symbol, signal.side.upper())
                 )
 
                 last_sent[key] = signature
-                sent_count += 1
+                queued_count += 1
 
-            return 1, sent_count
+            except Exception as e:
+                print(
+                    f"[{now_str()}] symbol-user error | {symbol} | user={user.get('telegram_id')} | {e}",
+                    flush=True,
+                )
 
-        except Exception as e:
-            print(f"[{now_str()}] scanner error | {symbol} | {e}")
-            return 0, 0
+        return 1, queued_count
 
 
-async def run_scanner(bot):
+async def run_scanner(bot, send_queue: asyncio.Queue):
+    print("run_scanner(): entered", flush=True)
+
     cycle_num = 0
     semaphore = asyncio.Semaphore(MAX_CONCURRENT_SYMBOLS)
     symbols = load_symbols()
 
-    print(f"[{now_str()}] Scanner started. Loaded {len(symbols)} crypto USDT symbols.")
-    print(f"[{now_str()}] Max concurrent symbols: {MAX_CONCURRENT_SYMBOLS}")
+    print(
+        f"[{now_str()}] Scanner started. Loaded {len(symbols)} crypto USDT symbols.",
+        flush=True,
+    )
 
     while True:
         cycle_num += 1
-        cycle_start = datetime.now()
+        cycle_started = time.perf_counter()
 
         if cycle_num == 1 or cycle_num % SYMBOLS_REFRESH_EVERY_CYCLES == 0:
             symbols = load_symbols()
-            print(f"[{now_str()}] Symbols refreshed. Loaded {len(symbols)} crypto USDT symbols.")
+            print(
+                f"[{now_str()}] Symbols refreshed. Loaded {len(symbols)} crypto USDT symbols.",
+                flush=True,
+            )
 
-        print(f"[{now_str()}] Scan cycle #{cycle_num} started.")
-        print(f"[{now_str()}] Symbols in cycle: {len(symbols)}")
+        print(f"[{now_str()}] Scan cycle #{cycle_num} started.", flush=True)
+        print(f"[{now_str()}] Symbols in cycle: {len(symbols)}", flush=True)
 
         users = get_all_active_users()
-        print(f"[{now_str()}] Active users: {len(users)}")
+        print(f"[{now_str()}] Active users: {len(users)}", flush=True)
+
+        if not users:
+            print(
+                f"[{now_str()}] No active users. Sleeping {SCAN_SLEEP_SECONDS}s.",
+                flush=True,
+            )
+            await asyncio.sleep(SCAN_SLEEP_SECONDS)
+            continue
 
         tasks = [
-            scan_one_symbol(bot, symbol, users, semaphore)
+            scan_one_symbol(symbol, users, semaphore, send_queue)
             for symbol in symbols
         ]
 
-        results = await asyncio.gather(*tasks, return_exceptions=False)
+        results = await asyncio.gather(*tasks, return_exceptions=True)
 
-        checked_count = sum(r[0] for r in results)
-        sent_count = sum(r[1] for r in results)
-        cycle_time = (datetime.now() - cycle_start).total_seconds()
+        checked_count = 0
+        queued_count = 0
+
+        for r in results:
+            if isinstance(r, Exception):
+                print(f"[{now_str()}] gather error | {r}", flush=True)
+                continue
+            checked_count += r[0]
+            queued_count += r[1]
+
+        cycle_time = time.perf_counter() - cycle_started
 
         print(
             f"[{now_str()}] Scan cycle #{cycle_num} finished. "
-            f"Checked symbols: {checked_count}. Sent signals: {sent_count}. "
-            f"Cycle time: {cycle_time:.2f}s"
+            f"Checked symbols: {checked_count}. Sent signals: {queued_count}. "
+            f"Cycle time: {cycle_time:.2f}s",
+            flush=True,
         )
 
         await asyncio.sleep(SCAN_SLEEP_SECONDS)
