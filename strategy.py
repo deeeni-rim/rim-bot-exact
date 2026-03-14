@@ -547,3 +547,16 @@ def process_user_symbol_fast(
         return raw_sell
 
     return None
+
+def _impulse_pct(df_1h: pd.DataFrame) -> Optional[float]:
+    if len(df_1h) < IMPULSE_LOOKBACK_H:
+        return None
+
+    window = df_1h.iloc[-IMPULSE_LOOKBACK_H:]
+    hi = float(window["high"].max())
+    lo = float(window["low"].min())
+
+    if lo == 0:
+        return None
+
+    return (hi - lo) / lo * 100.0
