@@ -11,6 +11,7 @@ from config import (
     SCAN_SLEEP_SECONDS,
 )
 from db import (
+    init_db,
     get_all_active_users,
     get_user_symbol_state,
     upsert_user_symbol_state,
@@ -42,7 +43,6 @@ def load_symbols():
     else:
         symbols = MANUAL_SYMBOLS
 
-    # только уникальные
     return sorted(set(symbols))
 
 
@@ -54,7 +54,6 @@ async def _get_klines_retry(symbol: str, interval: str, limit: int):
         try:
             df = await asyncio.to_thread(get_klines, symbol, interval, limit)
 
-            # пустые свечи — это не фатальная ошибка, просто пропускаем пару
             if df is None or len(df) == 0:
                 return None
 
@@ -141,8 +140,6 @@ async def scan_one_symbol(symbol, users, semaphore: asyncio.Semaphore):
 
         queued_count = 0
 
-        # группируем пользователей по чувствительности структуры,
-        # чтобы не строить pivots отдельно для каждого
         users_by_sens = {}
         for user in users:
             sens = int(user["structure_sensitivity"])
@@ -222,7 +219,7 @@ async def scan_one_symbol(symbol, users, semaphore: asyncio.Semaphore):
         return 1, queued_count
 
 
-async def run_scanner(bot=None):
+async def run_scanner():
     print("run_scanner(): entered", flush=True)
 
     cycle_num = 0
@@ -237,61 +234,76 @@ async def run_scanner(bot=None):
     )
 
     while True:
-        cycle_num += 1
-        cycle_started = time.perf_counter()
+        try:
+            cycle_num += 1
+            cycle_started = time.perf_counter()
 
-        if cycle_num == 1 or cycle_num % SYMBOLS_REFRESH_EVERY_CYCLES == 0:
-            raw_symbols = load_symbols()
-            symbols = await build_valid_symbols(raw_symbols)
-            print(
-                f"[{now_str()}] Symbols refreshed. Loaded {len(symbols)} valid crypto USDT futures symbols.",
-                flush=True,
-            )
+            if cycle_num == 1 or cycle_num % SYMBOLS_REFRESH_EVERY_CYCLES == 0:
+                raw_symbols = load_symbols()
+                symbols = await build_valid_symbols(raw_symbols)
+                print(
+                    f"[{now_str()}] Symbols refreshed. Loaded {len(symbols)} valid crypto USDT futures symbols.",
+                    flush=True,
+                )
 
-        print(f"[{now_str()}] Scan cycle #{cycle_num} started.", flush=True)
-        print(f"[{now_str()}] Symbols in cycle: {len(symbols)}", flush=True)
+            print(f"[{now_str()}] Scan cycle #{cycle_num} started.", flush=True)
+            print(f"[{now_str()}] Symbols in cycle: {len(symbols)}", flush=True)
 
-        users = get_all_active_users()
-        print(f"[{now_str()}] Active users: {len(users)}", flush=True)
+            users = get_all_active_users()
+            print(f"[{now_str()}] Active users: {len(users)}", flush=True)
 
-        if not users:
-            print(
-                f"[{now_str()}] No active users. Sleeping {SCAN_SLEEP_SECONDS}s.",
-                flush=True,
-            )
-            await asyncio.sleep(SCAN_SLEEP_SECONDS)
-            continue
-
-        results = []
-
-        for i in range(0, len(symbols), MAX_CONCURRENT_SYMBOLS):
-            batch = symbols[i:i + MAX_CONCURRENT_SYMBOLS]
-
-            tasks = [
-                scan_one_symbol(symbol, users, semaphore)
-                for symbol in batch
-            ]
-
-            batch_results = await asyncio.gather(*tasks, return_exceptions=True)
-            results.extend(batch_results)
-
-        checked_count = 0
-        queued_count = 0
-
-        for r in results:
-            if isinstance(r, Exception):
-                print(f"[{now_str()}] gather error | {r}", flush=True)
+            if not users:
+                print(
+                    f"[{now_str()}] No active users. Sleeping {SCAN_SLEEP_SECONDS}s.",
+                    flush=True,
+                )
+                await asyncio.sleep(SCAN_SLEEP_SECONDS)
                 continue
-            checked_count += r[0]
-            queued_count += r[1]
 
-        cycle_time = time.perf_counter() - cycle_started
+            results = []
 
-        print(
-            f"[{now_str()}] Scan cycle #{cycle_num} finished. "
-            f"Checked symbols: {checked_count}. Sent signals: {queued_count}. "
-            f"Cycle time: {cycle_time:.2f}s",
-            flush=True,
-        )
+            for i in range(0, len(symbols), MAX_CONCURRENT_SYMBOLS):
+                batch = symbols[i:i + MAX_CONCURRENT_SYMBOLS]
 
-        await asyncio.sleep(SCAN_SLEEP_SECONDS)
+                tasks = [
+                    scan_one_symbol(symbol, users, semaphore)
+                    for symbol in batch
+                ]
+
+                batch_results = await asyncio.gather(*tasks, return_exceptions=True)
+                results.extend(batch_results)
+
+            checked_count = 0
+            queued_count = 0
+
+            for r in results:
+                if isinstance(r, Exception):
+                    print(f"[{now_str()}] gather error | {r}", flush=True)
+                    continue
+                checked_count += r[0]
+                queued_count += r[1]
+
+            cycle_time = time.perf_counter() - cycle_started
+
+            print(
+                f"[{now_str()}] Scan cycle #{cycle_num} finished. "
+                f"Checked symbols: {checked_count}. Sent signals: {queued_count}. "
+                f"Cycle time: {cycle_time:.2f}s",
+                flush=True,
+            )
+
+            await asyncio.sleep(SCAN_SLEEP_SECONDS)
+
+        except Exception as e:
+            print(f"[{now_str()}] FATAL scanner loop error: {e}", flush=True)
+            await asyncio.sleep(5)
+
+
+async def main():
+    print("scanner_only.py started", flush=True)
+    init_db()
+    await run_scanner()
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
