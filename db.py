@@ -1,14 +1,14 @@
 import os
-from typing import Optional
 from datetime import datetime, timezone
 
 import psycopg2
 import psycopg2.extras
 
+DATABASE_URL = os.getenv("DATABASE_URL")
+
+
 def utc_now():
     return datetime.now(timezone.utc)
-
-DATABASE_URL = os.getenv("DATABASE_URL")
 
 
 def get_conn():
@@ -20,6 +20,7 @@ def get_conn():
 def init_db():
     with get_conn() as conn:
         with conn.cursor() as cur:
+            # users
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS users (
                     telegram_id BIGINT PRIMARY KEY,
@@ -37,6 +38,44 @@ def init_db():
             """)
 
             cur.execute("""
+                ALTER TABLE users
+                ADD COLUMN IF NOT EXISTS enable_long BOOLEAN DEFAULT TRUE
+            """)
+            cur.execute("""
+                ALTER TABLE users
+                ADD COLUMN IF NOT EXISTS enable_short BOOLEAN DEFAULT TRUE
+            """)
+            cur.execute("""
+                ALTER TABLE users
+                ADD COLUMN IF NOT EXISTS max_stop_pct DOUBLE PRECISION DEFAULT 3.0
+            """)
+            cur.execute("""
+                ALTER TABLE users
+                ADD COLUMN IF NOT EXISTS tp_rr DOUBLE PRECISION DEFAULT 1.0
+            """)
+            cur.execute("""
+                ALTER TABLE users
+                ADD COLUMN IF NOT EXISTS stop_buffer_pct DOUBLE PRECISION DEFAULT 1.0
+            """)
+            cur.execute("""
+                ALTER TABLE users
+                ADD COLUMN IF NOT EXISTS structure_sensitivity INTEGER DEFAULT 3
+            """)
+            cur.execute("""
+                ALTER TABLE users
+                ADD COLUMN IF NOT EXISTS signals_enabled BOOLEAN DEFAULT TRUE
+            """)
+            cur.execute("""
+                ALTER TABLE users
+                ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT NOW()
+            """)
+            cur.execute("""
+                ALTER TABLE users
+                ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT NOW()
+            """)
+
+            # user_symbol_state
+            cur.execute("""
                 CREATE TABLE IF NOT EXISTS user_symbol_state (
                     telegram_id BIGINT NOT NULL,
                     symbol TEXT NOT NULL,
@@ -53,43 +92,98 @@ def init_db():
             """)
 
             cur.execute("""
+                ALTER TABLE user_symbol_state
+                ADD COLUMN IF NOT EXISTS in_trade INTEGER DEFAULT 0
+            """)
+            cur.execute("""
+                ALTER TABLE user_symbol_state
+                ADD COLUMN IF NOT EXISTS trade_dir INTEGER DEFAULT 0
+            """)
+            cur.execute("""
+                ALTER TABLE user_symbol_state
+                ADD COLUMN IF NOT EXISTS entry DOUBLE PRECISION
+            """)
+            cur.execute("""
+                ALTER TABLE user_symbol_state
+                ADD COLUMN IF NOT EXISTS stop DOUBLE PRECISION
+            """)
+            cur.execute("""
+                ALTER TABLE user_symbol_state
+                ADD COLUMN IF NOT EXISTS tp DOUBLE PRECISION
+            """)
+            cur.execute("""
+                ALTER TABLE user_symbol_state
+                ADD COLUMN IF NOT EXISTS last_signature TEXT
+            """)
+            cur.execute("""
+                ALTER TABLE user_symbol_state
+                ADD COLUMN IF NOT EXISTS last_bar_marker TEXT
+            """)
+            cur.execute("""
+                ALTER TABLE user_symbol_state
+                ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT NOW()
+            """)
+
+            # outbound_queue
+            cur.execute("""
                 CREATE TABLE IF NOT EXISTS outbound_queue (
                     id BIGSERIAL PRIMARY KEY,
                     telegram_id BIGINT NOT NULL,
                     symbol TEXT NOT NULL,
                     side TEXT NOT NULL,
                     text TEXT NOT NULL,
-                    signal_key TEXT UNIQUE,
-                    status TEXT NOT NULL DEFAULT 'pending',
-                    attempts INTEGER NOT NULL DEFAULT 0,
-                    last_error TEXT,
-                    created_at TIMESTAMP NOT NULL DEFAULT NOW(),
-                    available_at TIMESTAMP NOT NULL DEFAULT NOW(),
+                    signal_key TEXT,
+                    status TEXT DEFAULT 'pending',
+                    attempts INTEGER DEFAULT 0,
+                    available_at TIMESTAMP DEFAULT NOW(),
                     locked_at TIMESTAMP,
                     locked_by TEXT,
-                    sent_at TIMESTAMP
+                    created_at TIMESTAMP DEFAULT NOW()
                 )
+            """)
+
+            cur.execute("""
+                ALTER TABLE outbound_queue
+                ADD COLUMN IF NOT EXISTS signal_key TEXT
+            """)
+            cur.execute("""
+                ALTER TABLE outbound_queue
+                ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'pending'
+            """)
+            cur.execute("""
+                ALTER TABLE outbound_queue
+                ADD COLUMN IF NOT EXISTS attempts INTEGER DEFAULT 0
+            """)
+            cur.execute("""
+                ALTER TABLE outbound_queue
+                ADD COLUMN IF NOT EXISTS available_at TIMESTAMP DEFAULT NOW()
+            """)
+            cur.execute("""
+                ALTER TABLE outbound_queue
+                ADD COLUMN IF NOT EXISTS locked_at TIMESTAMP
+            """)
+            cur.execute("""
+                ALTER TABLE outbound_queue
+                ADD COLUMN IF NOT EXISTS locked_by TEXT
+            """)
+            cur.execute("""
+                ALTER TABLE outbound_queue
+                ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT NOW()
             """)
 
             cur.execute("""
                 CREATE INDEX IF NOT EXISTS idx_outbound_queue_status_available
                 ON outbound_queue(status, available_at)
             """)
-
             cur.execute("""
-                CREATE INDEX IF NOT EXISTS idx_outbound_queue_locked_at
-                ON outbound_queue(locked_at)
-            """)
-
-            cur.execute("""
-                CREATE INDEX IF NOT EXISTS idx_user_symbol_state_user_symbol
-                ON user_symbol_state(telegram_id, symbol)
+                CREATE INDEX IF NOT EXISTS idx_outbound_queue_signal_key
+                ON outbound_queue(signal_key)
             """)
 
         conn.commit()
 
 
-def create_user_if_not_exists(telegram_id: int, username: Optional[str]):
+def create_user_if_not_exists(telegram_id: int, username: str | None):
     with get_conn() as conn:
         with conn.cursor() as cur:
             cur.execute("""
@@ -132,12 +226,6 @@ def update_user_setting(user_id: int, key: str, value):
             value = value.strip().lower() in {"1", "true", "yes", "on"}
         else:
             value = bool(value)
-
-    if key == "structure_sensitivity":
-        value = int(value)
-
-    if key in {"max_stop_pct", "tp_rr", "stop_buffer_pct"}:
-        value = float(value)
 
     with get_conn() as conn:
         with conn.cursor() as cur:
@@ -182,16 +270,8 @@ def upsert_user_symbol_state(state: dict):
         with conn.cursor() as cur:
             cur.execute("""
                 INSERT INTO user_symbol_state (
-                    telegram_id,
-                    symbol,
-                    in_trade,
-                    trade_dir,
-                    entry,
-                    stop,
-                    tp,
-                    last_signature,
-                    last_bar_marker,
-                    updated_at
+                    telegram_id, symbol, in_trade, trade_dir, entry, stop, tp,
+                    last_signature, last_bar_marker, updated_at
                 )
                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
                 ON CONFLICT (telegram_id, symbol)
@@ -224,23 +304,19 @@ def enqueue_outbound_message(
     side: str,
     text: str,
     signal_key: str,
-    created_at: datetime,
+    created_at=None,
 ):
+    if created_at is None:
+        created_at = utc_now()
+
     with get_conn() as conn:
         with conn.cursor() as cur:
             cur.execute("""
                 INSERT INTO outbound_queue (
-                    telegram_id,
-                    symbol,
-                    side,
-                    text,
-                    signal_key,
-                    status,
-                    attempts,
-                    created_at,
-                    available_at
+                    telegram_id, symbol, side, text, signal_key,
+                    status, attempts, available_at, created_at
                 )
-                VALUES (%s, %s, %s, %s, %s, 'pending', 0, %s, %s)
+                VALUES (%s, %s, %s, %s, %s, 'pending', 0, NOW(), %s)
                 ON CONFLICT (signal_key) DO NOTHING
             """, (
                 telegram_id,
@@ -249,12 +325,11 @@ def enqueue_outbound_message(
                 text,
                 signal_key,
                 created_at,
-                created_at,
             ))
         conn.commit()
 
 
-def claim_outbound_batch(worker_name: str, limit: int):
+def claim_outbound_batch(worker_name: str, batch_size: int = 10):
     with get_conn() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute("""
@@ -263,25 +338,23 @@ def claim_outbound_batch(worker_name: str, limit: int):
                     FROM outbound_queue
                     WHERE status = 'pending'
                       AND available_at <= NOW()
-                      AND (
-                            locked_at IS NULL
-                            OR locked_at < NOW() - INTERVAL '10 minutes'
-                          )
-                    ORDER BY created_at ASC
-                    LIMIT %s
+                    ORDER BY id
                     FOR UPDATE SKIP LOCKED
+                    LIMIT %s
                 )
                 UPDATE outbound_queue q
-                SET locked_at = NOW(),
-                    locked_by = %s,
-                    attempts = q.attempts + 1
+                SET
+                    status = 'processing',
+                    attempts = q.attempts + 1,
+                    locked_at = NOW(),
+                    locked_by = %s
                 FROM picked
                 WHERE q.id = picked.id
                 RETURNING q.*
-            """, (limit, worker_name))
+            """, (batch_size, worker_name))
             rows = cur.fetchall()
-        conn.commit()
-        return [dict(r) for r in rows]
+            conn.commit()
+            return [dict(r) for r in rows]
 
 
 def mark_outbound_sent(message_id: int):
@@ -289,43 +362,33 @@ def mark_outbound_sent(message_id: int):
         with conn.cursor() as cur:
             cur.execute("""
                 UPDATE outbound_queue
-                SET status = 'sent',
-                    sent_at = NOW(),
-                    locked_at = NULL,
-                    locked_by = NULL
+                SET status = 'sent'
                 WHERE id = %s
             """, (message_id,))
         conn.commit()
 
 
-def mark_outbound_failed(message_id: int, error_text: str):
+def mark_outbound_retry(message_id: int, retry_after_seconds: int = 60):
     with get_conn() as conn:
         with conn.cursor() as cur:
             cur.execute("""
                 UPDATE outbound_queue
-                SET status = 'failed',
-                    last_error = %s,
-                    locked_at = NULL,
-                    locked_by = NULL
-                WHERE id = %s
-            """, (str(error_text)[:1000], message_id))
-        conn.commit()
-
-
-def release_outbound_for_retry(message_id: int, error_text: str, delay_seconds: int):
-    with get_conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute("""
-                UPDATE outbound_queue
-                SET status = 'pending',
-                    last_error = %s,
+                SET
+                    status = 'pending',
                     available_at = NOW() + (%s || ' seconds')::interval,
                     locked_at = NULL,
                     locked_by = NULL
                 WHERE id = %s
-            """, (
-                str(error_text)[:1000],
-                str(delay_seconds),
-                message_id,
-            ))
+            """, (retry_after_seconds, message_id))
+        conn.commit()
+
+
+def mark_outbound_failed(message_id: int):
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                UPDATE outbound_queue
+                SET status = 'failed'
+                WHERE id = %s
+            """, (message_id,))
         conn.commit()

@@ -28,9 +28,9 @@ from strategy import (
     process_user_symbol_fast,
 )
 
-MAX_CONCURRENT_SYMBOLS = 24
-SYMBOLS_REFRESH_EVERY_CYCLES = 10
-VALIDATION_CONCURRENCY = 20
+MAX_CONCURRENT_SYMBOLS = 32
+SYMBOLS_REFRESH_EVERY_CYCLES = 30
+VALIDATION_CONCURRENCY = 30
 
 
 def now_str():
@@ -47,10 +47,9 @@ def load_symbols():
 
 
 async def _get_klines_retry(symbol: str, interval: str, limit: int):
-    delay = 0.6
-    last_error = None
+    delay = 0.35
 
-    for attempt in range(3):
+    for attempt in range(2):
         try:
             df = await asyncio.to_thread(get_klines, symbol, interval, limit)
 
@@ -60,24 +59,22 @@ async def _get_klines_retry(symbol: str, interval: str, limit: int):
             return df
 
         except Exception as e:
-            last_error = e
-
-            if attempt < 2:
+            if attempt < 1:
                 print(
-                    f"[{now_str()}] get_klines retry {attempt + 1}/3 | {symbol} | {interval} | {e}",
+                    f"[{now_str()}] get_klines retry {attempt + 1}/2 | {symbol} | {interval} | {e}",
                     flush=True,
                 )
                 await asyncio.sleep(delay)
                 delay *= 2
             else:
-                raise last_error
+                return None
 
 
 async def is_valid_futures_symbol(symbol: str) -> bool:
     try:
         df_5m, df_1h = await asyncio.gather(
-            _get_klines_retry(symbol, SCAN_TIMEFRAME, 80),
-            _get_klines_retry(symbol, FILTER_TIMEFRAME, 40),
+            _get_klines_retry(symbol, SCAN_TIMEFRAME, 60),
+            _get_klines_retry(symbol, FILTER_TIMEFRAME, 30),
         )
 
         if df_5m is None or df_1h is None:
@@ -124,8 +121,8 @@ async def scan_one_symbol(symbol, users, semaphore: asyncio.Semaphore):
     async with semaphore:
         try:
             df_scan, df_filter = await asyncio.gather(
-                _get_klines_retry(symbol, SCAN_TIMEFRAME, 180),
-                _get_klines_retry(symbol, FILTER_TIMEFRAME, 140),
+                _get_klines_retry(symbol, SCAN_TIMEFRAME, 120),
+                _get_klines_retry(symbol, FILTER_TIMEFRAME, 80),
             )
         except Exception as e:
             print(f"[{now_str()}] scanner error | {symbol} | {e}", flush=True)

@@ -10,7 +10,7 @@ SESSION.headers.update({
 })
 
 
-def _safe_get(url: str, params: dict | None = None, timeout: int = 15):
+def _safe_get(url: str, params: dict | None = None, timeout: int = 6):
     r = SESSION.get(url, params=params, timeout=timeout)
     r.raise_for_status()
     return r.json()
@@ -31,12 +31,9 @@ def get_contract_symbols(limit: int = 1000) -> List[str]:
         if not symbol:
             continue
 
-        # Только USDT perpetual/futures пары
         if not symbol.endswith("_USDT"):
             continue
 
-        # При желании можно фильтровать по статусу,
-        # но MEXC не всегда стабильно отдает поле состояния.
         symbols.append(symbol)
 
     return sorted(set(symbols))[:limit]
@@ -59,16 +56,6 @@ def get_klines(symbol: str, interval: str, limit: int = 200) -> Optional[pd.Data
     if not raw:
         return None
 
-    # Ожидаемый формат:
-    # {
-    #   "time": [...],
-    #   "open": [...],
-    #   "close": [...],
-    #   "high": [...],
-    #   "low": [...],
-    #   "vol": [...],
-    #   "amount": [...]
-    # }
     times = raw.get("time") or []
     opens = raw.get("open") or []
     highs = raw.get("high") or []
@@ -101,7 +88,6 @@ def get_klines(symbol: str, interval: str, limit: int = 200) -> Optional[pd.Data
     for col in ["open", "high", "low", "close", "vol"]:
         df[col] = pd.to_numeric(df[col], errors="coerce")
 
-    # MEXC contract API обычно отдаёт unix timestamp в секундах
     df["time"] = pd.to_datetime(df["time"], unit="s", errors="coerce")
 
     df = df.dropna(subset=["time", "open", "high", "low", "close"]).reset_index(drop=True)
