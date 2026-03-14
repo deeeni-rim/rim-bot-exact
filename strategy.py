@@ -29,6 +29,15 @@ class TradeState:
     last_signature: Optional[str] = None
     last_bar_marker: Optional[str] = None
 
+@dataclass
+class MarketSnapshot:
+    close_now: float
+    close_prev: float
+    fh_close: float
+    fh_ema: float
+    vol_ok: bool
+    impulse_ok: bool
+
 
 def signature_to_str(sig: tuple | None) -> Optional[str]:
     return json.dumps(sig) if sig is not None else None
@@ -369,3 +378,172 @@ def process_user_symbol(df_scan: pd.DataFrame, df_1h: pd.DataFrame, user: dict, 
 
 def calculate_signal(df_scan, df_1h, user, trade_state):
     return process_user_symbol(df_scan, df_1h, user, trade_state)
+
+def build_market_snapshot(df_scan: pd.DataFrame, df_1h: pd.DataFrame) -> Optional[MarketSnapshot]:
+    if len(df_scan) < 6 or len(df_1h) < max(EMA_LEN, VOL_MA_LEN, IMPULSE_LOOKBACK_H) + 2:
+        return None
+
+    close_now = float(df_scan["close"].iloc[-2])
+    close_prev = float(df_scan["close"].iloc[-3])
+
+    fh_close = float(df_1h["close"].iloc[-2])
+    fh_ema = float(_ema(df_1h["close"], EMA_LEN).iloc[-2])
+
+    vol_col = "vol" if "vol" in df_1h.columns else "volume"
+    fh_vol = float(df_1h[vol_col].iloc[-2]) if vol_col in df_1h.columns else 0.0
+    fh_vol_ma = float(_sma(df_1h[vol_col], VOL_MA_LEN).iloc[-2]) if vol_col in df_1h.columns else 0.0
+
+    impulse_pct = _impulse_pct(df_1h)
+    if impulse_pct is None:
+        return None
+
+    vol_ok = (not USE_VOL_FILTER) or (fh_vol > fh_vol_ma)
+    impulse_ok = impulse_pct >= IMPULSE_MIN_PCT
+
+    return MarketSnapshot(
+        close_now=close_now,
+        close_prev=close_prev,
+        fh_close=fh_close,
+        fh_ema=fh_ema,
+        vol_ok=vol_ok,
+        impulse_ok=impulse_ok,
+    )
+
+def build_signal_from_snapshot(
+    snapshot: MarketSnapshot,
+    long_l,
+    long_h,
+    short_h,
+    short_l,
+    user: dict,
+) -> tuple[Optional[Signal], Optional[Signal]]:
+    enable_long = bool(user["enable_long"])
+    enable_short = bool(user["enable_short"])
+    max_stop_pct = float(user["max_stop_pct"])
+    stop_buffer_pct = float(user["stop_buffer_pct"])
+    tp_rr = float(user["tp_rr"])
+
+    raw_buy = None
+    if enable_long:
+        long_trend_ok = snapshot.fh_close > snapshot.fh_ema
+        long_filter_ok = long_trend_ok and snapshot.impulse_ok and snapshot.vol_ok
+
+        long_reclaim = (
+            long_filter_ok
+            and long_h is not None
+            and long_l is not None
+            and snapshot.close_now > long_h
+            and snapshot.close_prev <= long_h
+        )
+
+        if long_reclaim:
+            long_stop = long_l * (1.0 - stop_buffer_pct / 100.0)
+            long_stop_dist_pct = (
+                ((snapshot.close_now - long_stop) / snapshot.close_now) * 100.0
+                if snapshot.close_now != 0 else math.inf
+            )
+
+            if long_stop_dist_pct <= max_stop_pct:
+                long_tp = snapshot.close_now + (snapshot.close_now - long_stop) * tp_rr
+                raw_buy = Signal(
+                    side="long",
+                    entry=snapshot.close_now,
+                    stop=long_stop,
+                    tp=long_tp,
+                    risk_pct=long_stop_dist_pct,
+                    signature=(
+                        "long",
+                        round(snapshot.close_now, 10),
+                        round(long_stop, 10),
+                        round(long_tp, 10),
+                    ),
+                )
+
+    raw_sell = None
+    if enable_short:
+        short_trend_ok = snapshot.fh_close < snapshot.fh_ema
+        short_filter_ok = short_trend_ok and snapshot.impulse_ok and snapshot.vol_ok
+
+        short_breakdown = (
+            short_filter_ok
+            and short_h is not None
+            and short_l is not None
+            and snapshot.close_now < short_l
+            and snapshot.close_prev >= short_l
+        )
+
+        if short_breakdown:
+            short_stop = short_h * (1.0 + stop_buffer_pct / 100.0)
+            short_stop_dist_pct = (
+                ((short_stop - snapshot.close_now) / snapshot.close_now) * 100.0
+                if snapshot.close_now != 0 else math.inf
+            )
+
+            if short_stop_dist_pct <= max_stop_pct:
+                short_tp = snapshot.close_now - (short_stop - snapshot.close_now) * tp_rr
+                raw_sell = Signal(
+                    side="short",
+                    entry=snapshot.close_now,
+                    stop=short_stop,
+                    tp=short_tp,
+                    risk_pct=short_stop_dist_pct,
+                    signature=(
+                        "short",
+                        round(snapshot.close_now, 10),
+                        round(short_stop, 10),
+                        round(short_tp, 10),
+                    ),
+                )
+
+    return raw_buy, raw_sell
+
+def process_user_symbol_fast(
+    snapshot: MarketSnapshot,
+    df_scan: pd.DataFrame,
+    long_l,
+    long_h,
+    short_h,
+    short_l,
+    user: dict,
+    trade_state: TradeState,
+):
+    update_trade_state_for_bar(trade_state, df_scan)
+
+    raw_buy, raw_sell = build_signal_from_snapshot(
+        snapshot=snapshot,
+        long_l=long_l,
+        long_h=long_h,
+        short_h=short_h,
+        short_l=short_l,
+        user=user,
+    )
+
+    if raw_buy is not None and (not trade_state.in_trade or trade_state.trade_dir == 1):
+        sig_str = signature_to_str(raw_buy.signature)
+        if trade_state.last_signature == sig_str:
+            return None
+
+        trade_state.in_trade = True
+        trade_state.trade_dir = 1
+        trade_state.entry = raw_buy.entry
+        trade_state.stop = raw_buy.stop
+        trade_state.tp = raw_buy.tp
+        trade_state.last_signature = sig_str
+        trade_state.last_bar_marker = str(df_scan.index[-2])
+        return raw_buy
+
+    if raw_sell is not None and (not trade_state.in_trade or trade_state.trade_dir == -1):
+        sig_str = signature_to_str(raw_sell.signature)
+        if trade_state.last_signature == sig_str:
+            return None
+
+        trade_state.in_trade = True
+        trade_state.trade_dir = -1
+        trade_state.entry = raw_sell.entry
+        trade_state.stop = raw_sell.stop
+        trade_state.tp = raw_sell.tp
+        trade_state.last_signature = sig_str
+        trade_state.last_bar_marker = str(df_scan.index[-2])
+        return raw_sell
+
+    return None

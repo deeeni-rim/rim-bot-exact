@@ -23,7 +23,14 @@ from db import (
     enqueue_outbound_message,
 )
 from mexc_client import get_contract_symbols, get_klines
-from strategy import process_user_symbol, state_from_db, state_to_db
+from strategy import (
+    state_from_db,
+    state_to_db,
+    build_market_snapshot,
+    _build_long_structure,
+    _build_short_structure,
+    process_user_symbol_fast,
+)
 
 
 def now_str():
@@ -80,62 +87,86 @@ async def scan_one_symbol(symbol, users, semaphore: asyncio.Semaphore):
         if df_scan is None or df_filter is None:
             return 0, 0
 
+        snapshot = build_market_snapshot(df_scan, df_filter)
+        if snapshot is None:
+            return 1, 0
+
         queued_count = 0
 
-        # Один и тот же рынок, но у пользователей могут быть разные настройки
+        users_by_sens = {}
         for user in users:
+            sens = int(user["structure_sensitivity"])
+            users_by_sens.setdefault(sens, []).append(user)
+
+        for sens, sens_users in users_by_sens.items():
             try:
-                trade_row = get_user_symbol_state(user["telegram_id"], symbol)
-                trade_state = state_from_db(trade_row or {})
-
-                signal = process_user_symbol(df_scan, df_filter, user, trade_state)
-
-                upsert_user_symbol_state(
-                    state_to_db(user["telegram_id"], symbol, trade_state)
-                )
-
-                if not signal:
-                    continue
-
-                side_label = "🟢 LONG" if signal.side == "long" else "🔴 SHORT"
-
-                text = (
-                    f"{side_label}\n\n"
-                    f"Монета: {symbol}\n"
-                    f"ТФ: {SCAN_TIMEFRAME}\n"
-                    f"Вход: {signal.entry:.8f}\n"
-                    f"Стоп: {signal.stop:.8f}\n"
-                    f"Тейк: {signal.tp:.8f}\n"
-                    f"Риск: {signal.risk_pct:.2f}%"
-                )
-
-                bar_marker = str(df_scan.index[-2])
-
-                print(
-                    f"[{now_str()}] SIGNAL {signal.side.upper()} | {symbol} | "
-                    f"user={user['telegram_id']} | entry={signal.entry:.8f} | stop={signal.stop:.8f}",
-                    flush=True,
-                )
-
-                enqueue_outbound_message(
-                    telegram_id=user["telegram_id"],
-                    symbol=symbol,
-                    side=signal.side.upper(),
-                    text=text,
-                    signal_key=f"{user['telegram_id']}|{symbol}|{signal.side}|{bar_marker}",
-                    created_at=utc_now(),
-                )
-
-                queued_count += 1
-
+                long_l, long_h = _build_long_structure(df_scan, sens)
+                short_h, short_l = _build_short_structure(df_scan, sens)
             except Exception as e:
-                print(
-                    f"[{now_str()}] symbol-user error | {symbol} | user={user.get('telegram_id')} | {e}",
-                    flush=True,
-                )
+                print(f"[{now_str()}] structure error | {symbol} | sens={sens} | {e}", flush=True)
+                continue
+
+            for user in sens_users:
+                try:
+                    trade_row = get_user_symbol_state(user["telegram_id"], symbol)
+                    trade_state = state_from_db(trade_row or {})
+
+                    signal = process_user_symbol_fast(
+                        snapshot=snapshot,
+                        df_scan=df_scan,
+                        long_l=long_l,
+                        long_h=long_h,
+                        short_h=short_h,
+                        short_l=short_l,
+                        user=user,
+                        trade_state=trade_state,
+                    )
+
+                    upsert_user_symbol_state(
+                        state_to_db(user["telegram_id"], symbol, trade_state)
+                    )
+
+                    if not signal:
+                        continue
+
+                    side_label = "🟢 LONG" if signal.side == "long" else "🔴 SHORT"
+
+                    text = (
+                        f"{side_label}\n\n"
+                        f"Монета: {symbol}\n"
+                        f"ТФ: {SCAN_TIMEFRAME}\n"
+                        f"Вход: {signal.entry:.8f}\n"
+                        f"Стоп: {signal.stop:.8f}\n"
+                        f"Тейк: {signal.tp:.8f}\n"
+                        f"Риск: {signal.risk_pct:.2f}%"
+                    )
+
+                    bar_marker = str(df_scan.index[-2])
+
+                    print(
+                        f"[{now_str()}] SIGNAL {signal.side.upper()} | {symbol} | "
+                        f"user={user['telegram_id']} | entry={signal.entry:.8f} | stop={signal.stop:.8f}",
+                        flush=True,
+                    )
+
+                    enqueue_outbound_message(
+                        telegram_id=user["telegram_id"],
+                        symbol=symbol,
+                        side=signal.side.upper(),
+                        text=text,
+                        signal_key=f"{user['telegram_id']}|{symbol}|{signal.side}|{bar_marker}",
+                        created_at=utc_now(),
+                    )
+
+                    queued_count += 1
+
+                except Exception as e:
+                    print(
+                        f"[{now_str()}] symbol-user error | {symbol} | user={user.get('telegram_id')} | {e}",
+                        flush=True,
+                    )
 
         return 1, queued_count
-
 
 async def run_scanner():
     bot = Bot(token=BOT_TOKEN)
