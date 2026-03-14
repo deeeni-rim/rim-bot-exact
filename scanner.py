@@ -17,6 +17,7 @@ from db import (
     get_user_symbol_state,
     upsert_user_symbol_state,
     enqueue_message,
+    get_outbound_queue_stats,
 )
 from mexc_client import get_contract_symbols, get_klines
 from strategy import process_user_symbol, state_from_db, state_to_db
@@ -102,7 +103,10 @@ async def scan_one_symbol(symbol, users, semaphore: asyncio.Semaphore):
                     f"Риск: {signal.risk_pct:.2f}%"
                 )
 
-                dedupe_key = f"{user['telegram_id']}:{symbol}:{signal.side}:{signal.entry:.8f}:{signal.stop:.8f}:{signal.tp:.8f}"
+                dedupe_key = (
+                    f"{user['telegram_id']}:{symbol}:{signal.side}:"
+                    f"{signal.entry:.8f}:{signal.stop:.8f}:{signal.tp:.8f}"
+                )
 
                 enqueue_message(
                     telegram_id=user["telegram_id"],
@@ -173,11 +177,23 @@ async def run_scanner(bot):
 
         cycle_time = time.perf_counter() - cycle_started
 
-        print(
-            f"[{now_str()}] Scan cycle #{cycle_num} finished. "
-            f"Checked symbols: {checked_count}. Sent signals: {queued_count}. "
-            f"Cycle time: {cycle_time:.2f}s",
-            flush=True,
-        )
+        try:
+            stats = await asyncio.to_thread(get_outbound_queue_stats)
+            print(
+                f"[{now_str()}] Scan cycle #{cycle_num} finished. "
+                f"Checked symbols: {checked_count}. Queued signals: {queued_count}. "
+                f"Cycle time: {cycle_time:.2f}s | "
+                f"queue_pending={stats['pending_count']} | "
+                f"queue_retry={stats['retry_count']} | "
+                f"queue_processing={stats['processing_count']}",
+                flush=True,
+            )
+        except Exception as e:
+            print(
+                f"[{now_str()}] Scan cycle #{cycle_num} finished. "
+                f"Checked symbols: {checked_count}. Queued signals: {queued_count}. "
+                f"Cycle time: {cycle_time:.2f}s | queue stats error: {e}",
+                flush=True,
+            )
 
         await asyncio.sleep(SCAN_SLEEP_SECONDS)

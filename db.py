@@ -60,7 +60,9 @@ def init_db():
                     created_at TIMESTAMP DEFAULT NOW(),
                     updated_at TIMESTAMP DEFAULT NOW(),
                     sent_at TIMESTAMP,
-                    dedupe_key TEXT
+                    dedupe_key TEXT,
+                    locked_at TIMESTAMP,
+                    worker_id TEXT
                 )
             """)
 
@@ -70,13 +72,17 @@ def init_db():
             """)
 
             cur.execute("""
+                CREATE INDEX IF NOT EXISTS idx_outbound_queue_locked_at
+                ON outbound_queue (locked_at)
+            """)
+
+            cur.execute("""
                 CREATE UNIQUE INDEX IF NOT EXISTS idx_outbound_queue_dedupe
                 ON outbound_queue (dedupe_key)
                 WHERE dedupe_key IS NOT NULL
             """)
 
         conn.commit()
-
 
 def create_user_if_not_exists(telegram_id: int, username: str | None):
     with get_conn() as conn:
@@ -198,7 +204,8 @@ def enqueue_message(telegram_id: int, text: str, symbol: str | None, side: str |
         with conn.cursor() as cur:
             cur.execute("""
                 INSERT INTO outbound_queue (
-                    telegram_id, text, symbol, side, dedupe_key, status, retry_count, created_at, updated_at
+                    telegram_id, text, symbol, side, dedupe_key,
+                    status, retry_count, created_at, updated_at
                 )
                 VALUES (%s, %s, %s, %s, %s, 'pending', 0, NOW(), NOW())
                 ON CONFLICT (dedupe_key) DO NOTHING
@@ -206,17 +213,29 @@ def enqueue_message(telegram_id: int, text: str, symbol: str | None, side: str |
         conn.commit()
 
 
-def fetch_pending_messages(limit: int = 50):
+def claim_outbound_messages(limit: int, worker_id: str):
     with get_conn() as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute("""
-                SELECT id, telegram_id, text, symbol, side, retry_count
-                FROM outbound_queue
-                WHERE status IN ('pending', 'retry')
-                ORDER BY created_at ASC
-                LIMIT %s
-            """, (limit,))
+                WITH picked AS (
+                    SELECT id
+                    FROM outbound_queue
+                    WHERE status IN ('pending', 'retry')
+                    ORDER BY created_at ASC
+                    LIMIT %s
+                    FOR UPDATE SKIP LOCKED
+                )
+                UPDATE outbound_queue q
+                SET status = 'processing',
+                    locked_at = NOW(),
+                    worker_id = %s,
+                    updated_at = NOW()
+                FROM picked
+                WHERE q.id = picked.id
+                RETURNING q.id, q.telegram_id, q.text, q.symbol, q.side, q.retry_count
+            """, (limit, worker_id))
             rows = cur.fetchall()
+            conn.commit()
             return [dict(r) for r in rows]
 
 
@@ -227,7 +246,9 @@ def mark_message_sent(queue_id: int):
                 UPDATE outbound_queue
                 SET status = 'sent',
                     sent_at = NOW(),
-                    updated_at = NOW()
+                    updated_at = NOW(),
+                    locked_at = NULL,
+                    worker_id = NULL
                 WHERE id = %s
             """, (queue_id,))
         conn.commit()
@@ -241,7 +262,9 @@ def mark_message_retry(queue_id: int, error_text: str):
                 SET status = 'retry',
                     retry_count = retry_count + 1,
                     last_error = %s,
-                    updated_at = NOW()
+                    updated_at = NOW(),
+                    locked_at = NULL,
+                    worker_id = NULL
                 WHERE id = %s
             """, (error_text[:1000], queue_id))
         conn.commit()
@@ -254,7 +277,65 @@ def mark_message_failed(queue_id: int, error_text: str):
                 UPDATE outbound_queue
                 SET status = 'failed',
                     last_error = %s,
-                    updated_at = NOW()
+                    updated_at = NOW(),
+                    locked_at = NULL,
+                    worker_id = NULL
                 WHERE id = %s
             """, (error_text[:1000], queue_id))
         conn.commit()
+
+
+def requeue_stale_processing(max_age_seconds: int = 300):
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                UPDATE outbound_queue
+                SET status = 'retry',
+                    updated_at = NOW(),
+                    locked_at = NULL,
+                    worker_id = NULL,
+                    last_error = COALESCE(last_error, 'stale processing requeued')
+                WHERE status = 'processing'
+                  AND locked_at IS NOT NULL
+                  AND locked_at < NOW() - (%s || ' seconds')::interval
+            """, (max_age_seconds,))
+        conn.commit()
+
+
+def cleanup_outbound_queue(sent_older_than_days: int = 3, failed_older_than_days: int = 7):
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                DELETE FROM outbound_queue
+                WHERE status = 'sent'
+                  AND sent_at IS NOT NULL
+                  AND sent_at < NOW() - (%s || ' days')::interval
+            """, (sent_older_than_days,))
+
+            cur.execute("""
+                DELETE FROM outbound_queue
+                WHERE status = 'failed'
+                  AND updated_at < NOW() - (%s || ' days')::interval
+            """, (failed_older_than_days,))
+        conn.commit()
+
+def get_outbound_queue_stats():
+    with get_conn() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("""
+                SELECT
+                    COUNT(*) FILTER (WHERE status = 'pending')    AS pending_count,
+                    COUNT(*) FILTER (WHERE status = 'retry')      AS retry_count,
+                    COUNT(*) FILTER (WHERE status = 'processing') AS processing_count,
+                    COUNT(*) FILTER (WHERE status = 'failed')     AS failed_count,
+                    COUNT(*) FILTER (WHERE status = 'sent')       AS sent_count
+                FROM outbound_queue
+            """)
+            row = cur.fetchone()
+            return dict(row) if row else {
+                "pending_count": 0,
+                "retry_count": 0,
+                "processing_count": 0,
+                "failed_count": 0,
+                "sent_count": 0,
+            }
