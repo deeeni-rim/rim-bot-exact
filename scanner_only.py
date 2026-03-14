@@ -1,26 +1,21 @@
 import asyncio
 import time
-from datetime import datetime, timezone
-
-from telegram import Bot
+from datetime import datetime
 
 from config import (
-    BOT_TOKEN,
     AUTO_LOAD_SYMBOLS,
     MANUAL_SYMBOLS,
     MAX_AUTO_SYMBOLS,
     SCAN_TIMEFRAME,
     FILTER_TIMEFRAME,
     SCAN_SLEEP_SECONDS,
-    MAX_CONCURRENT_SYMBOLS,
-    SYMBOLS_REFRESH_EVERY_CYCLES,
 )
 from db import (
-    init_db,
     get_all_active_users,
     get_user_symbol_state,
     upsert_user_symbol_state,
     enqueue_outbound_message,
+    utc_now,
 )
 from mexc_client import get_contract_symbols, get_klines
 from strategy import (
@@ -32,13 +27,13 @@ from strategy import (
     process_user_symbol_fast,
 )
 
+MAX_CONCURRENT_SYMBOLS = 24
+SYMBOLS_REFRESH_EVERY_CYCLES = 10
+VALIDATION_CONCURRENCY = 20
+
 
 def now_str():
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-
-def utc_now():
-    return datetime.now(timezone.utc)
 
 
 def load_symbols():
@@ -47,6 +42,7 @@ def load_symbols():
     else:
         symbols = MANUAL_SYMBOLS
 
+    # только уникальные
     return sorted(set(symbols))
 
 
@@ -58,6 +54,7 @@ async def _get_klines_retry(symbol: str, interval: str, limit: int):
         try:
             df = await asyncio.to_thread(get_klines, symbol, interval, limit)
 
+            # пустые свечи — это не фатальная ошибка, просто пропускаем пару
             if df is None or len(df) == 0:
                 return None
 
@@ -75,6 +72,54 @@ async def _get_klines_retry(symbol: str, interval: str, limit: int):
                 delay *= 2
             else:
                 raise last_error
+
+
+async def is_valid_futures_symbol(symbol: str) -> bool:
+    try:
+        df_5m, df_1h = await asyncio.gather(
+            _get_klines_retry(symbol, SCAN_TIMEFRAME, 80),
+            _get_klines_retry(symbol, FILTER_TIMEFRAME, 40),
+        )
+
+        if df_5m is None or df_1h is None:
+            return False
+
+        if len(df_5m) < 20 or len(df_1h) < 20:
+            return False
+
+        return True
+    except Exception:
+        return False
+
+
+async def build_valid_symbols(symbols: list[str]) -> list[str]:
+    print(f"[{now_str()}] Validating futures symbols: {len(symbols)}", flush=True)
+
+    semaphore = asyncio.Semaphore(VALIDATION_CONCURRENCY)
+
+    async def _check(sym: str):
+        async with semaphore:
+            ok = await is_valid_futures_symbol(sym)
+            return sym, ok
+
+    tasks = [_check(sym) for sym in symbols]
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+
+    valid = []
+
+    for r in results:
+        if isinstance(r, Exception):
+            continue
+        sym, ok = r
+        if ok:
+            valid.append(sym)
+
+    print(
+        f"[{now_str()}] Futures validation finished. Valid symbols: {len(valid)} / {len(symbols)}",
+        flush=True,
+    )
+    return valid
+
 
 async def scan_one_symbol(symbol, users, semaphore: asyncio.Semaphore):
     async with semaphore:
@@ -96,6 +141,8 @@ async def scan_one_symbol(symbol, users, semaphore: asyncio.Semaphore):
 
         queued_count = 0
 
+        # группируем пользователей по чувствительности структуры,
+        # чтобы не строить pivots отдельно для каждого
         users_by_sens = {}
         for user in users:
             sens = int(user["structure_sensitivity"])
@@ -106,7 +153,10 @@ async def scan_one_symbol(symbol, users, semaphore: asyncio.Semaphore):
                 long_l, long_h = _build_long_structure(df_scan, sens)
                 short_h, short_l = _build_short_structure(df_scan, sens)
             except Exception as e:
-                print(f"[{now_str()}] structure error | {symbol} | sens={sens} | {e}", flush=True)
+                print(
+                    f"[{now_str()}] structure error | {symbol} | sens={sens} | {e}",
+                    flush=True,
+                )
                 continue
 
             for user in sens_users:
@@ -171,16 +221,18 @@ async def scan_one_symbol(symbol, users, semaphore: asyncio.Semaphore):
 
         return 1, queued_count
 
-async def run_scanner():
-    bot = Bot(token=BOT_TOKEN)
-    print("scanner_only.py: before run_scanner()", flush=True)
+
+async def run_scanner(bot=None):
+    print("run_scanner(): entered", flush=True)
 
     cycle_num = 0
     semaphore = asyncio.Semaphore(MAX_CONCURRENT_SYMBOLS)
-    symbols = load_symbols()
+
+    raw_symbols = load_symbols()
+    symbols = await build_valid_symbols(raw_symbols)
 
     print(
-        f"[{now_str()}] Scanner started. Loaded {len(symbols)} crypto USDT symbols.",
+        f"[{now_str()}] Scanner started. Loaded {len(symbols)} valid crypto USDT futures symbols.",
         flush=True,
     )
 
@@ -189,9 +241,10 @@ async def run_scanner():
         cycle_started = time.perf_counter()
 
         if cycle_num == 1 or cycle_num % SYMBOLS_REFRESH_EVERY_CYCLES == 0:
-            symbols = load_symbols()
+            raw_symbols = load_symbols()
+            symbols = await build_valid_symbols(raw_symbols)
             print(
-                f"[{now_str()}] Symbols refreshed. Loaded {len(symbols)} crypto USDT symbols.",
+                f"[{now_str()}] Symbols refreshed. Loaded {len(symbols)} valid crypto USDT futures symbols.",
                 flush=True,
             )
 
@@ -242,12 +295,3 @@ async def run_scanner():
         )
 
         await asyncio.sleep(SCAN_SLEEP_SECONDS)
-
-
-async def main():
-    init_db()
-    await run_scanner()
-
-
-if __name__ == "__main__":
-    asyncio.run(main())

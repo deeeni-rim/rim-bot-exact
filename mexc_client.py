@@ -1,102 +1,114 @@
 import time
-import requests
+from typing import List, Optional
+
 import pandas as pd
+import requests
 
-BASE_URL = "https://api.mexc.com"
 
+BASE_URL = "https://contract.mexc.com"
 SESSION = requests.Session()
 SESSION.headers.update({
-    "User-Agent": "rim-bot/1.0"
+    "User-Agent": "Mozilla/5.0",
+    "Accept": "application/json",
 })
 
-EXCLUDE_KEYWORDS = {
-    "STOCK", "XAU", "XAG", "GOLD", "SILVER",
-    "WTI", "BRENT", "NASDAQ", "DJI", "SPX"
-}
 
-QUOTE_SUFFIX = "_USDT"
-
-_KLINES_CACHE = {}
-_SYMBOLS_CACHE = {
-    "ts": 0,
-    "data": []
-}
-
-KLINES_TTL_SEC = 20
-SYMBOLS_TTL_SEC = 60 * 30
-
-
-def is_crypto_usdt_symbol(symbol: str) -> bool:
-    s = str(symbol).upper().strip()
-
-    if not s.endswith(QUOTE_SUFFIX):
-        return False
-
-    if any(word in s for word in EXCLUDE_KEYWORDS):
-        return False
-
-    return True
-
-
-def get_contract_symbols(max_auto_symbols: int = 0):
-    now = time.time()
-
-    if _SYMBOLS_CACHE["data"] and (now - _SYMBOLS_CACHE["ts"] < SYMBOLS_TTL_SEC):
-        symbols = _SYMBOLS_CACHE["data"]
-    else:
-        url = f"{BASE_URL}/api/v1/contract/detail"
-        r = SESSION.get(url, timeout=20)
-        r.raise_for_status()
-        payload = r.json()
-
-        rows = payload.get("data", [])
-        symbols = []
-
-        for item in rows:
-            symbol = str(item.get("symbol", "")).upper().strip()
-
-            if not is_crypto_usdt_symbol(symbol):
-                continue
-
-            symbols.append(symbol)
-
-        symbols = sorted(set(symbols))
-
-        _SYMBOLS_CACHE["ts"] = now
-        _SYMBOLS_CACHE["data"] = symbols
-
-    if max_auto_symbols and max_auto_symbols > 0:
-        return symbols[:max_auto_symbols]
-
-    return symbols
-
-
-def get_klines(symbol: str, interval: str, limit: int = 150):
-    now = time.time()
-    cache_key = (symbol, interval, limit)
-
-    cached = _KLINES_CACHE.get(cache_key)
-    if cached and (now - cached["ts"] < KLINES_TTL_SEC):
-        return cached["df"]
-
-    url = f"{BASE_URL}/api/v1/contract/kline/{symbol}?interval={interval}&limit={limit}"
-    r = SESSION.get(url, timeout=20)
+def _safe_get(url: str, params: dict | None = None, timeout: int = 15):
+    r = SESSION.get(url, params=params, timeout=timeout)
     r.raise_for_status()
-    payload = r.json()
+    return r.json()
 
-    data = payload.get("data")
-    if not data:
-        return None
 
-    df = pd.DataFrame(data)
+def get_contract_symbols(limit: int = 1000) -> List[str]:
+    url = f"{BASE_URL}/api/v1/contract/detail"
+    data = _safe_get(url)
 
-    for col in ["open", "high", "low", "close", "vol"]:
-        if col in df.columns:
-            df[col] = df[col].astype(float)
+    items = data.get("data") or []
+    symbols = []
 
-    _KLINES_CACHE[cache_key] = {
-        "ts": now,
-        "df": df
+    for item in items:
+        symbol = item.get("symbol")
+        if not symbol:
+            continue
+
+        # оставляем только USDT futures
+        if not symbol.endswith("_USDT"):
+            continue
+
+        # если есть статус листинга/торговли — фильтруем
+        state = str(item.get("state", "")).lower()
+        if state and state not in {"0", "1", "enabled", "online"}:
+            # если API когда-то отдаст другой статус — пропускаем
+            pass
+
+        symbols.append(symbol)
+
+    return sorted(set(symbols))[:limit]
+
+
+def get_klines(symbol: str, interval: str, limit: int = 200) -> Optional[pd.DataFrame]:
+    # MEXC futures kline endpoint
+    url = f"{BASE_URL}/api/v1/contract/kline/{symbol}"
+
+    params = {
+        "interval": interval,
+        "limit": limit,
     }
 
+    data = _safe_get(url, params=params)
+    raw = data.get("data")
+
+    if not raw:
+        return None
+
+    # MEXC contract kline обычно отдаёт dict массивов
+    # пример:
+    # {
+    #   "time": [...],
+    #   "open": [...],
+    #   "close": [...],
+    #   "high": [...],
+    #   "low": [...],
+    #   "vol": [...],
+    #   "amount": [...]
+    # }
+    times = raw.get("time") or []
+    opens = raw.get("open") or []
+    highs = raw.get("high") or []
+    lows = raw.get("low") or []
+    closes = raw.get("close") or []
+    vols = raw.get("vol") or raw.get("volume") or []
+
+    if not times or not opens or not highs or not lows or not closes:
+        return None
+
+    min_len = min(len(times), len(opens), len(highs), len(lows), len(closes))
+    if vols:
+        min_len = min(min_len, len(vols))
+
+    if min_len <= 0:
+        return None
+
+    df = pd.DataFrame({
+        "time": times[:min_len],
+        "open": opens[:min_len],
+        "high": highs[:min_len],
+        "low": lows[:min_len],
+        "close": closes[:min_len],
+        "vol": vols[:min_len] if vols else [0.0] * min_len,
+    })
+
+    if df.empty:
+        return None
+
+    for col in ["open", "high", "low", "close", "vol"]:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    df["time"] = pd.to_datetime(df["time"], unit="s", errors="coerce")
+    df = df.dropna(subset=["time", "open", "high", "low", "close"]).reset_index(drop=True)
+
+    if df.empty:
+        return None
+
+    df = df.set_index("time")
     return df
