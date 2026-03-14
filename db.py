@@ -102,7 +102,7 @@ def create_user_if_not_exists(telegram_id: int, username: Optional[str]):
 
 def get_user(telegram_id: int):
     with get_conn() as conn:
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute("""
                 SELECT *
                 FROM users
@@ -155,7 +155,7 @@ def update_user_setting(user_id: int, key: str, value):
 
 def get_all_active_users():
     with get_conn() as conn:
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute("""
                 SELECT *
                 FROM users
@@ -167,7 +167,7 @@ def get_all_active_users():
 
 def get_user_symbol_state(telegram_id: int, symbol: str):
     with get_conn() as conn:
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute("""
                 SELECT *
                 FROM user_symbol_state
@@ -256,7 +256,7 @@ def enqueue_outbound_message(
 
 def claim_outbound_batch(worker_name: str, limit: int):
     with get_conn() as conn:
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute("""
                 WITH picked AS (
                     SELECT id
