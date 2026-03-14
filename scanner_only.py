@@ -206,22 +206,18 @@ async def run_scanner():
             await asyncio.sleep(SCAN_SLEEP_SECONDS)
             continue
 
-            results = []
+        results = []
 
-for i in range(0, len(symbols), MAX_CONCURRENT_SYMBOLS):
-    batch = symbols[i:i + MAX_CONCURRENT_SYMBOLS]
+        for i in range(0, len(symbols), MAX_CONCURRENT_SYMBOLS):
+            batch = symbols[i:i + MAX_CONCURRENT_SYMBOLS]
 
-    tasks = [
-        scan_one_symbol(symbol, users, semaphore)
-        for symbol in batch
-    ]
+            tasks = [
+                scan_one_symbol(symbol, users, semaphore)
+                for symbol in batch
+            ]
 
-    batch_results = await asyncio.gather(*tasks, return_exceptions=True)
-
-    results.extend(batch_results)
-
-    batch_results = await asyncio.gather(*tasks, return_exceptions=True)
-    results.extend(batch_results)
+            batch_results = await asyncio.gather(*tasks, return_exceptions=True)
+            results.extend(batch_results)
 
         checked_count = 0
         queued_count = 0
