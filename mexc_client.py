@@ -1,9 +1,6 @@
-import time
-from typing import List, Optional
-
-import pandas as pd
 import requests
-
+import pandas as pd
+from typing import List, Optional
 
 BASE_URL = "https://contract.mexc.com"
 SESSION = requests.Session()
@@ -20,6 +17,9 @@ def _safe_get(url: str, params: dict | None = None, timeout: int = 15):
 
 
 def get_contract_symbols(limit: int = 1000) -> List[str]:
+    """
+    Возвращает только futures USDT-пары с MEXC contract API.
+    """
     url = f"{BASE_URL}/api/v1/contract/detail"
     data = _safe_get(url)
 
@@ -31,25 +31,23 @@ def get_contract_symbols(limit: int = 1000) -> List[str]:
         if not symbol:
             continue
 
-        # оставляем только USDT futures
+        # Только USDT perpetual/futures пары
         if not symbol.endswith("_USDT"):
             continue
 
-        # если есть статус листинга/торговли — фильтруем
-        state = str(item.get("state", "")).lower()
-        if state and state not in {"0", "1", "enabled", "online"}:
-            # если API когда-то отдаст другой статус — пропускаем
-            pass
-
+        # При желании можно фильтровать по статусу,
+        # но MEXC не всегда стабильно отдает поле состояния.
         symbols.append(symbol)
 
     return sorted(set(symbols))[:limit]
 
 
 def get_klines(symbol: str, interval: str, limit: int = 200) -> Optional[pd.DataFrame]:
-    # MEXC futures kline endpoint
+    """
+    Получает futures candles с MEXC.
+    interval: Min1 / Min5 / Min15 / Min60 / Hour4 / Day1 ...
+    """
     url = f"{BASE_URL}/api/v1/contract/kline/{symbol}"
-
     params = {
         "interval": interval,
         "limit": limit,
@@ -61,8 +59,7 @@ def get_klines(symbol: str, interval: str, limit: int = 200) -> Optional[pd.Data
     if not raw:
         return None
 
-    # MEXC contract kline обычно отдаёт dict массивов
-    # пример:
+    # Ожидаемый формат:
     # {
     #   "time": [...],
     #   "open": [...],
@@ -104,7 +101,9 @@ def get_klines(symbol: str, interval: str, limit: int = 200) -> Optional[pd.Data
     for col in ["open", "high", "low", "close", "vol"]:
         df[col] = pd.to_numeric(df[col], errors="coerce")
 
+    # MEXC contract API обычно отдаёт unix timestamp в секундах
     df["time"] = pd.to_datetime(df["time"], unit="s", errors="coerce")
+
     df = df.dropna(subset=["time", "open", "high", "low", "close"]).reset_index(drop=True)
 
     if df.empty:
