@@ -1,10 +1,12 @@
 import os
-from datetime import datetime
 from typing import Optional
+from datetime import datetime, timezone
 
 import psycopg2
-from psycopg2.extras import RealDictCursor
+import psycopg2.extras
 
+def utc_now():
+    return datetime.now(timezone.utc)
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 
