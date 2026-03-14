@@ -47,10 +47,32 @@ def init_db():
                 )
             """)
 
-            # На случай старой базы: добавим колонку, если ее нет
             cur.execute("""
-                ALTER TABLE users
-                ADD COLUMN IF NOT EXISTS signals_enabled BOOLEAN DEFAULT TRUE
+                CREATE TABLE IF NOT EXISTS outbound_queue (
+                    id BIGSERIAL PRIMARY KEY,
+                    telegram_id BIGINT NOT NULL,
+                    text TEXT NOT NULL,
+                    symbol TEXT,
+                    side TEXT,
+                    status TEXT NOT NULL DEFAULT 'pending',
+                    retry_count INTEGER NOT NULL DEFAULT 0,
+                    last_error TEXT,
+                    created_at TIMESTAMP DEFAULT NOW(),
+                    updated_at TIMESTAMP DEFAULT NOW(),
+                    sent_at TIMESTAMP,
+                    dedupe_key TEXT
+                )
+            """)
+
+            cur.execute("""
+                CREATE INDEX IF NOT EXISTS idx_outbound_queue_status_created
+                ON outbound_queue (status, created_at)
+            """)
+
+            cur.execute("""
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_outbound_queue_dedupe
+                ON outbound_queue (dedupe_key)
+                WHERE dedupe_key IS NOT NULL
             """)
 
         conn.commit()
@@ -60,18 +82,8 @@ def create_user_if_not_exists(telegram_id: int, username: str | None):
     with get_conn() as conn:
         with conn.cursor() as cur:
             cur.execute("""
-                INSERT INTO users (
-                    telegram_id,
-                    username,
-                    enable_long,
-                    enable_short,
-                    max_stop_pct,
-                    tp_rr,
-                    stop_buffer_pct,
-                    structure_sensitivity,
-                    signals_enabled
-                )
-                VALUES (%s, %s, TRUE, TRUE, 3.0, 1.0, 1.0, 3, TRUE)
+                INSERT INTO users (telegram_id, username)
+                VALUES (%s, %s)
                 ON CONFLICT (telegram_id) DO NOTHING
             """, (telegram_id, username))
         conn.commit()
@@ -87,41 +99,6 @@ def get_user(telegram_id: int):
             """, (telegram_id,))
             row = cur.fetchone()
             return dict(row) if row else None
-
-
-def update_user_field(telegram_id: int, field: str, value):
-    allowed_fields = {
-        "enable_long",
-        "enable_short",
-        "max_stop_pct",
-        "tp_rr",
-        "stop_buffer_pct",
-        "structure_sensitivity",
-        "signals_enabled",
-        "username",
-    }
-
-    if field not in allowed_fields:
-        raise ValueError(f"Field {field} is not allowed")
-
-    if field in {"enable_long", "enable_short", "signals_enabled"}:
-        if isinstance(value, str):
-            value = value.strip().lower() in {"1", "true", "yes", "on"}
-        else:
-            value = bool(value)
-
-    with get_conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                f"""
-                UPDATE users
-                SET {field} = %s,
-                    updated_at = NOW()
-                WHERE telegram_id = %s
-                """,
-                (value, telegram_id)
-            )
-        conn.commit()
 
 
 def update_user_setting(user_id: int, key: str, value):
@@ -213,4 +190,71 @@ def upsert_user_symbol_state(state: dict):
                 state.get("last_signature"),
                 state.get("last_bar_marker"),
             ))
+        conn.commit()
+
+
+def enqueue_message(telegram_id: int, text: str, symbol: str | None, side: str | None, dedupe_key: str | None):
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO outbound_queue (
+                    telegram_id, text, symbol, side, dedupe_key, status, retry_count, created_at, updated_at
+                )
+                VALUES (%s, %s, %s, %s, %s, 'pending', 0, NOW(), NOW())
+                ON CONFLICT (dedupe_key) DO NOTHING
+            """, (telegram_id, text, symbol, side, dedupe_key))
+        conn.commit()
+
+
+def fetch_pending_messages(limit: int = 50):
+    with get_conn() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("""
+                SELECT id, telegram_id, text, symbol, side, retry_count
+                FROM outbound_queue
+                WHERE status IN ('pending', 'retry')
+                ORDER BY created_at ASC
+                LIMIT %s
+            """, (limit,))
+            rows = cur.fetchall()
+            return [dict(r) for r in rows]
+
+
+def mark_message_sent(queue_id: int):
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                UPDATE outbound_queue
+                SET status = 'sent',
+                    sent_at = NOW(),
+                    updated_at = NOW()
+                WHERE id = %s
+            """, (queue_id,))
+        conn.commit()
+
+
+def mark_message_retry(queue_id: int, error_text: str):
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                UPDATE outbound_queue
+                SET status = 'retry',
+                    retry_count = retry_count + 1,
+                    last_error = %s,
+                    updated_at = NOW()
+                WHERE id = %s
+            """, (error_text[:1000], queue_id))
+        conn.commit()
+
+
+def mark_message_failed(queue_id: int, error_text: str):
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                UPDATE outbound_queue
+                SET status = 'failed',
+                    last_error = %s,
+                    updated_at = NOW()
+                WHERE id = %s
+            """, (error_text[:1000], queue_id))
         conn.commit()
