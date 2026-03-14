@@ -57,11 +57,15 @@ async def _get_klines_retry(symbol: str, interval: str, limit: int):
     for attempt in range(3):
         try:
             df = await asyncio.to_thread(get_klines, symbol, interval, limit)
+
             if df is None or len(df) == 0:
-                raise RuntimeError("empty dataframe")
+                return None
+
             return df
+
         except Exception as e:
             last_error = e
+
             if attempt < 2:
                 print(
                     f"[{now_str()}] get_klines retry {attempt + 1}/3 | {symbol} | {interval} | {e}",
@@ -71,7 +75,6 @@ async def _get_klines_retry(symbol: str, interval: str, limit: int):
                 delay *= 2
             else:
                 raise last_error
-
 
 async def scan_one_symbol(symbol, users, semaphore: asyncio.Semaphore):
     async with semaphore:
