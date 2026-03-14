@@ -2,35 +2,48 @@ import os
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 
+# Основной ТФ сигналов
 SCAN_TIMEFRAME = os.getenv("SCAN_TIMEFRAME", "Min5")
-FILTER_TIMEFRAME = "Min60"
 
-AUTO_LOAD_SYMBOLS = True
+# ТФ фильтра тренда
+FILTER_TIMEFRAME = os.getenv("FILTER_TIMEFRAME", "Min60")
 
+# Пауза между циклами
+SCAN_SLEEP_SECONDS = int(os.getenv("SCAN_SLEEP_SECONDS", "5"))
+
+# Автозагрузка всех символов
+AUTO_LOAD_SYMBOLS = os.getenv("AUTO_LOAD_SYMBOLS", "1") == "1"
+
+# Если выключишь автозагрузку
 MANUAL_SYMBOLS = [
     "BTC_USDT",
     "ETH_USDT",
 ]
 
-MAX_AUTO_SYMBOLS = 1000
+# Сколько максимум монет грузить
+MAX_AUTO_SYMBOLS = int(os.getenv("MAX_AUTO_SYMBOLS", "1000"))
 
+# Параллелизм сканера
+MAX_CONCURRENT_SYMBOLS = int(os.getenv("MAX_CONCURRENT_SYMBOLS", "24"))
+
+# Как часто обновлять список монет
+SYMBOLS_REFRESH_EVERY_CYCLES = int(os.getenv("SYMBOLS_REFRESH_EVERY_CYCLES", "20"))
+
+# Скрытые настройки стратегии — как в Pine
 EMA_LEN = 50
 IMPULSE_LOOKBACK_H = 12
 IMPULSE_MIN_PCT = 0.3
 USE_VOL_FILTER = True
 VOL_MA_LEN = 20
 
-# scanner
-MAX_CONCURRENT_SYMBOLS = 25
-SYMBOLS_REFRESH_EVERY_CYCLES = 10
-SCAN_SLEEP_SECONDS = 2
+# Sender / очередь
+SEND_WORKERS = int(os.getenv("SEND_WORKERS", "4"))
+SEND_RETRY_MAX = int(os.getenv("SEND_RETRY_MAX", "4"))
+SEND_RETRY_DELAYS = [10, 20, 40, 60]
+SEND_WORKER_PAUSE = float(os.getenv("SEND_WORKER_PAUSE", "0.12"))
 
-# sender
-SEND_WORKERS = 5
-SEND_DELAY_SECONDS = 0.08
-SEND_RETRIES = 3
-SEND_TIMEOUT_SECONDS = 15
-SENDER_POLL_SECONDS = 1
+# Сигнал считается устаревшим через столько секунд
+SIGNAL_TTL_SECONDS = int(os.getenv("SIGNAL_TTL_SECONDS", "120"))
 
 DEFAULT_SETTINGS = {
     "enable_long": True,
