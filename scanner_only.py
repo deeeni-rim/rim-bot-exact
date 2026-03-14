@@ -219,7 +219,6 @@ for i in range(0, len(symbols), MAX_CONCURRENT_SYMBOLS):
     batch_results = await asyncio.gather(*tasks, return_exceptions=True)
 
     results.extend(batch_results)
-    ]
 
     batch_results = await asyncio.gather(*tasks, return_exceptions=True)
     results.extend(batch_results)
