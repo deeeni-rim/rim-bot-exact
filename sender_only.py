@@ -1,143 +1,119 @@
-import asyncio
+import os
+import time
+import requests
 from datetime import datetime, timezone
 
-from telegram import Bot
-from telegram.error import TimedOut, RetryAfter, NetworkError
-
-from config import (
-    BOT_TOKEN,
-    SEND_WORKERS,
-    SEND_RETRY_MAX,
-    SEND_RETRY_DELAYS,
-    SEND_WORKER_PAUSE,
-    SIGNAL_TTL_SECONDS,
-)
 from db import (
     init_db,
     claim_outbound_batch,
     mark_outbound_sent,
+    mark_outbound_retry,
     mark_outbound_failed,
-    release_outbound_for_retry,
 )
 
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+WORKER_NAME = os.getenv("WORKER_NAME", "sender-1")
 
-def now_str():
-    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+SEND_BATCH = 10
+SEND_SLEEP = 1
+
+TELEGRAM_URL = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
 
 
-def utc_now():
+def now():
     return datetime.now(timezone.utc)
 
 
-def is_expired(created_at):
-    if created_at is None:
-        return False
-    age = (utc_now() - created_at).total_seconds()
-    return age > SIGNAL_TTL_SECONDS
-
-
-async def send_one(bot: Bot, row: dict):
-    telegram_id = row["telegram_id"]
-    text = row["text"]
-
-    await bot.send_message(
-        chat_id=telegram_id,
-        text=text,
-        disable_web_page_preview=True,
+def send_message(chat_id: int, text: str):
+    r = requests.post(
+        TELEGRAM_URL,
+        json={
+            "chat_id": chat_id,
+            "text": text,
+        },
+        timeout=10,
     )
 
+    if r.status_code != 200:
+        raise Exception(f"telegram error {r.status_code}: {r.text}")
 
-async def worker(worker_name: str, bot: Bot):
-    while True:
-        batch = claim_outbound_batch(worker_name, 1)
+    data = r.json()
 
-        if not batch:
-            await asyncio.sleep(0.5)
-            continue
+    if not data.get("ok"):
+        raise Exception(data)
 
-        row = batch[0]
-        msg_id = row["id"]
-        created_at = row.get("created_at")
-        attempts = int(row.get("attempts", 0))
-        telegram_id = row["telegram_id"]
-        symbol = row["symbol"]
-        side = row["side"]
+    return True
+
+
+def process_batch():
+    jobs = claim_outbound_batch(WORKER_NAME, SEND_BATCH)
+
+    if not jobs:
+        return 0
+
+    sent = 0
+
+    for job in jobs:
+        msg_id = job["id"]
+        user = job["telegram_id"]
+        text = job["text"]
+        symbol = job["symbol"]
+        side = job["side"]
 
         try:
-            if is_expired(created_at):
-                print(
-                    f"[{now_str()}] skip expired | user={telegram_id} | {symbol} | {side}",
-                    flush=True,
-                )
-                mark_outbound_failed(msg_id, "expired")
-                await asyncio.sleep(SEND_WORKER_PAUSE)
-                continue
+            send_message(user, text)
 
-            await send_one(bot, row)
-
-            print(
-                f"[{now_str()}] SENT to user={telegram_id} | {symbol} | {side}",
-                flush=True,
-            )
             mark_outbound_sent(msg_id)
 
-        except RetryAfter as e:
-            delay = int(getattr(e, "retry_after", 10))
             print(
-                f"[{now_str()}] send_message retry-after | user={telegram_id} | {symbol} | {delay}s",
+                f"SENT | user={user} | {symbol} | {side}",
                 flush=True,
             )
-            release_outbound_for_retry(msg_id, f"RetryAfter: {delay}s", delay)
 
-        except (TimedOut, NetworkError) as e:
-            if attempts + 1 >= SEND_RETRY_MAX:
-                print(
-                    f"[{now_str()}] send_message failed окончательно | user={telegram_id} | {symbol} | {side}",
-                    flush=True,
-                )
-                mark_outbound_failed(msg_id, str(e))
-            else:
-                delay = SEND_RETRY_DELAYS[min(attempts, len(SEND_RETRY_DELAYS) - 1)]
-                print(
-                    f"[{now_str()}] send_message retry {attempts + 1}/{SEND_RETRY_MAX} | "
-                    f"user={telegram_id} | {symbol} | {e}",
-                    flush=True,
-                )
-                release_outbound_for_retry(msg_id, str(e), delay)
+            sent += 1
 
         except Exception as e:
-            if attempts + 1 >= SEND_RETRY_MAX:
+
+            err = str(e)
+
+            # Telegram flood control
+            if "429" in err:
                 print(
-                    f"[{now_str()}] send_message failed окончательно | user={telegram_id} | {symbol} | {side} | {e}",
+                    f"RATE LIMIT | retry later | user={user}",
                     flush=True,
                 )
-                mark_outbound_failed(msg_id, str(e))
+                mark_outbound_retry(msg_id, 30)
+
             else:
-                delay = SEND_RETRY_DELAYS[min(attempts, len(SEND_RETRY_DELAYS) - 1)]
                 print(
-                    f"[{now_str()}] send_message retry {attempts + 1}/{SEND_RETRY_MAX} | "
-                    f"user={telegram_id} | {symbol} | {e}",
+                    f"send_message failed окончательно | user={user} | {symbol} | {side} | {err}",
                     flush=True,
                 )
-                release_outbound_for_retry(msg_id, str(e), delay)
 
-        await asyncio.sleep(SEND_WORKER_PAUSE)
+                mark_outbound_failed(msg_id)
+
+    return sent
 
 
-async def main():
+def run_sender():
+    print("sender started", flush=True)
+
+    while True:
+        try:
+            sent = process_batch()
+
+            if sent == 0:
+                time.sleep(SEND_SLEEP)
+
+        except Exception as e:
+            print("sender fatal error:", e, flush=True)
+            time.sleep(3)
+
+
+def main():
     init_db()
-    bot = Bot(token=BOT_TOKEN)
-
-    print("sender_only.py started", flush=True)
-    print(f"workers={SEND_WORKERS}", flush=True)
-
-    tasks = [
-        asyncio.create_task(worker(f"worker-{i+1}", bot))
-        for i in range(SEND_WORKERS)
-    ]
-
-    await asyncio.gather(*tasks)
+    run_sender()
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
