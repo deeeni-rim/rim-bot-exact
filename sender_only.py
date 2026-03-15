@@ -20,7 +20,7 @@ SEND_SLEEP = 1
 TELEGRAM_URL = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
 
 
-def now():
+def utc_now():
     return datetime.now(timezone.utc)
 
 
@@ -40,7 +40,7 @@ def send_message(chat_id: int, text: str):
     data = r.json()
 
     if not data.get("ok"):
-        raise Exception(data)
+        raise Exception(str(data))
 
     return True
 
@@ -61,8 +61,17 @@ def process_batch():
         side = job["side"]
 
         try:
-            send_message(user, text)
+            available_at = job.get("available_at")
 
+            if available_at is not None:
+                if available_at.tzinfo is None:
+                    available_at = available_at.replace(tzinfo=timezone.utc)
+
+                if utc_now() < available_at:
+                    mark_outbound_retry(msg_id, 5)
+                    continue
+
+            send_message(user, text)
             mark_outbound_sent(msg_id)
 
             print(
@@ -73,23 +82,19 @@ def process_batch():
             sent += 1
 
         except Exception as e:
-
             err = str(e)
 
-            # Telegram flood control
             if "429" in err:
                 print(
-                    f"RATE LIMIT | retry later | user={user}",
+                    f"send_message retry 1/4 | user={user} | {symbol} | {err}",
                     flush=True,
                 )
                 mark_outbound_retry(msg_id, 30)
-
             else:
                 print(
                     f"send_message failed окончательно | user={user} | {symbol} | {side} | {err}",
                     flush=True,
                 )
-
                 mark_outbound_failed(msg_id)
 
     return sent
@@ -106,7 +111,7 @@ def run_sender():
                 time.sleep(SEND_SLEEP)
 
         except Exception as e:
-            print("sender fatal error:", e, flush=True)
+            print(f"sender fatal error: {e}", flush=True)
             time.sleep(3)
 
 
