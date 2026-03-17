@@ -22,11 +22,12 @@ from db import (
 from redis_state import pop_bar_event_payload, set_signal_lock
 from signal_engine import process_symbol_for_user
 
+
 _users_cache = []
 _users_cache_at = 0.0
 
 
-def now_str():
+def now_str() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
@@ -53,6 +54,9 @@ def get_users_cached():
 
 def records_to_df(records: list[dict]) -> pd.DataFrame:
     df = pd.DataFrame(records)
+    if df.empty:
+        return df
+
     df["time"] = pd.to_datetime(df["time"], errors="coerce")
     df = df.dropna(subset=["time"]).copy()
 
@@ -64,6 +68,73 @@ def records_to_df(records: list[dict]) -> pd.DataFrame:
     df = df.set_index("time")
     df = df.sort_index()
     return df
+
+
+def symbol_to_tv(symbol: str) -> str:
+    clean = symbol.replace("_", "")
+    return f"https://www.tradingview.com/chart/?symbol=MEXC:{clean}"
+
+
+def symbol_to_mexc(symbol: str) -> str:
+    return f"https://futures.mexc.com/exchange/{symbol}?type=linear_swap"
+
+
+def format_signal_message(
+    symbol: str,
+    side: str,
+    entry: float,
+    stop: float,
+    tp: float,
+    risk_pct: float,
+    user_settings: dict | None = None,
+) -> str:
+    side_upper = side.upper()
+    emoji = "🟢" if side_upper == "LONG" else "🔴"
+
+    tp_rr = None
+    max_stop_pct = None
+    enable_long = None
+    enable_short = None
+
+    if user_settings:
+        tp_rr = user_settings.get("tp_rr")
+        max_stop_pct = user_settings.get("max_stop_pct")
+        enable_long = user_settings.get("enable_long")
+        enable_short = user_settings.get("enable_short")
+
+    lines = [
+        f"{emoji} {side_upper} SIGNAL",
+        "",
+        f"Монета: {symbol}",
+        "Таймфрейм: 5m",
+        f"Вход: {entry:.8f}",
+        f"Стоп: {stop:.8f}",
+        f"Тейк: {tp:.8f}",
+        f"Риск: {risk_pct:.2f}%",
+    ]
+
+    if tp_rr is not None or max_stop_pct is not None or enable_long is not None or enable_short is not None:
+        lines.extend(["", "Настройки пользователя:"])
+        if tp_rr is not None:
+            lines.append(f"TP/RR: {tp_rr}")
+        if max_stop_pct is not None:
+            lines.append(f"Макс. стоп: {max_stop_pct}%")
+        if enable_long is not None:
+            lines.append(f"LONG: {'ON' if enable_long else 'OFF'}")
+        if enable_short is not None:
+            lines.append(f"SHORT: {'ON' if enable_short else 'OFF'}")
+
+    lines.extend(
+        [
+            "",
+            f"TV: {symbol_to_tv(symbol)}",
+            f"MEXC: {symbol_to_mexc(symbol)}",
+            "",
+            f"Время: {datetime.utcnow().strftime('%d.%m.%Y %H:%M UTC')}",
+        ]
+    )
+
+    return "\n".join(lines)
 
 
 async def process_bar_event(event: dict):
@@ -86,6 +157,9 @@ async def process_bar_event(event: dict):
     df_scan = records_to_df(candles_5m)
     df_filter = records_to_df(candles_1h)
 
+    if df_scan.empty or df_filter.empty:
+        return
+
     if len(df_scan) < 10 or len(df_filter) < 20:
         return
 
@@ -94,7 +168,8 @@ async def process_bar_event(event: dict):
 
     for user in users:
         try:
-            trade_row = get_user_symbol_state(user["telegram_id"], symbol)
+            telegram_id = user["telegram_id"]
+            trade_row = get_user_symbol_state(telegram_id, symbol)
 
             signal, trade_state, snapshot_meta = process_symbol_for_user(
                 df_scan=df_scan,
@@ -108,7 +183,7 @@ async def process_bar_event(event: dict):
             upsert_user_symbol_state(
                 {
                     **base,
-                    "telegram_id": user["telegram_id"],
+                    "telegram_id": telegram_id,
                     "symbol": symbol,
                     "in_trade": 1 if trade_state.in_trade else 0,
                     "trade_dir": trade_state.trade_dir,
@@ -124,7 +199,7 @@ async def process_bar_event(event: dict):
                 continue
 
             locked = set_signal_lock(
-                user_id=user["telegram_id"],
+                user_id=telegram_id,
                 symbol=symbol,
                 side=signal.side,
                 bar_marker=bar_marker,
@@ -133,24 +208,22 @@ async def process_bar_event(event: dict):
             if not locked:
                 continue
 
-            side_label = "🟢 LONG" if signal.side == "long" else "🔴 SHORT"
-
-            text = (
-                f"{side_label}\n\n"
-                f"Монета: {symbol}\n"
-                f"ТФ: Min5\n"
-                f"Вход: {signal.entry:.8f}\n"
-                f"Стоп: {signal.stop:.8f}\n"
-                f"Тейк: {signal.tp:.8f}\n"
-                f"Риск: {signal.risk_pct:.2f}%"
+            text = format_signal_message(
+                symbol=symbol,
+                side=signal.side.upper(),
+                entry=signal.entry,
+                stop=signal.stop,
+                tp=signal.tp,
+                risk_pct=signal.risk_pct,
+                user_settings=user,
             )
 
             enqueue_outbound_message(
-                telegram_id=user["telegram_id"],
+                telegram_id=telegram_id,
                 symbol=symbol,
                 side=signal.side.upper(),
                 text=text,
-                signal_key=f"{user['telegram_id']}|{symbol}|{signal.side}|{bar_marker}",
+                signal_key=f"{telegram_id}|{symbol}|{signal.side}|{bar_marker}",
                 created_at=utc_now(),
             )
 
@@ -158,7 +231,7 @@ async def process_bar_event(event: dict):
 
             print(
                 f"[{now_str()}] REDIS SIGNAL {signal.side.upper()} | {symbol} | "
-                f"user={user['telegram_id']} | bar={bar_marker}",
+                f"user={telegram_id} | bar={bar_marker}",
                 flush=True,
             )
 
@@ -178,6 +251,10 @@ async def process_bar_event(event: dict):
 async def main():
     print("signal_engine_worker.py started", flush=True)
     init_db()
+    print(
+        f"[{now_str()}] signal shard | index={SIGNAL_SHARD_INDEX} count={SIGNAL_SHARD_COUNT}",
+        flush=True,
+    )
 
     while True:
         try:

@@ -23,11 +23,11 @@ BOOTSTRAP_5M_LIMIT = 120
 BOOTSTRAP_1H_LIMIT = 80
 SUBSCRIBE_BATCH_SLEEP = 0.01
 
-memory_5m = {}
-memory_1h = {}
+memory_5m: dict[str, list[dict]] = {}
+memory_1h: dict[str, list[dict]] = {}
 
 
-def now_str():
+def now_str() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
@@ -36,11 +36,12 @@ def stable_partition(symbol: str, shard_count: int) -> int:
     return int(h, 16) % shard_count
 
 
-def load_symbols():
+def load_symbols() -> list[str]:
     if AUTO_LOAD_SYMBOLS:
         symbols = get_contract_symbols(MAX_AUTO_SYMBOLS)
     else:
         symbols = MANUAL_SYMBOLS
+
     return sorted(set(symbols))
 
 
@@ -48,17 +49,19 @@ def shard_symbols(symbols: list[str], shard_index: int, shard_count: int) -> lis
     return [s for s in symbols if stable_partition(s, shard_count) == shard_index]
 
 
-def df_to_records(df, limit: int):
+def df_to_records(df, limit: int) -> list[dict]:
     out = []
     for idx, row in df.tail(limit).iterrows():
-        out.append({
-            "time": str(idx),
-            "open": float(row["open"]),
-            "high": float(row["high"]),
-            "low": float(row["low"]),
-            "close": float(row["close"]),
-            "vol": float(row["vol"]) if "vol" in row else 0.0,
-        })
+        out.append(
+            {
+                "time": str(idx),
+                "open": float(row["open"]),
+                "high": float(row["high"]),
+                "low": float(row["low"]),
+                "close": float(row["close"]),
+                "vol": float(row["vol"]) if "vol" in row else 0.0,
+            }
+        )
     return out
 
 
@@ -68,7 +71,7 @@ def iso_from_ts(ts_seconds: int) -> str:
 
 async def bootstrap_symbol(symbol: str):
     try:
-        if symbol in memory_5m and symbol in memory_1h:
+        if symbol in memory_5m and len(memory_5m[symbol]) > 50 and symbol in memory_1h and len(memory_1h[symbol]) > 20:
             return
 
         df_5m, df_1h = await asyncio.gather(
@@ -88,7 +91,7 @@ async def bootstrap_symbol(symbol: str):
         print(f"[{now_str()}] bootstrap error | {symbol} | {e}", flush=True)
 
 
-def merge_candle(existing: list, candle: dict, max_len: int):
+def merge_candle(existing: list[dict], candle: dict, max_len: int):
     if not existing:
         return [candle], None
 
@@ -129,8 +132,8 @@ def handle_kline_push(symbol: str, interval: str, data: dict):
                 "symbol": symbol,
                 "timeframe": "Min5",
                 "bar_marker": closed_bar_marker,
-                "candles_5m": updated,
-                "candles_1h": memory_1h.get(symbol, []),
+                "candles_5m": updated[-80:],
+                "candles_1h": memory_1h.get(symbol, [])[-50:],
             }
             push_bar_event_payload(payload)
 
@@ -234,7 +237,7 @@ async def main():
 
     semaphore = asyncio.Semaphore(20)
 
-    async def _boot(sym):
+    async def _boot(sym: str):
         async with semaphore:
             await bootstrap_symbol(sym)
 
