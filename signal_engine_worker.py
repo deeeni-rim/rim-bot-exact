@@ -19,12 +19,7 @@ from db import (
     enqueue_outbound_message,
     utc_now,
 )
-from redis_state import (
-    pop_bar_close_event,
-    load_symbol_candles_5m,
-    load_symbol_candles_1h,
-    set_signal_lock,
-)
+from redis_state import pop_bar_event_payload, set_signal_lock
 from signal_engine import process_symbol_for_user
 
 _users_cache = []
@@ -82,8 +77,8 @@ async def process_bar_event(event: dict):
     if not symbol_belongs_to_this_worker(symbol):
         return
 
-    candles_5m = load_symbol_candles_5m(symbol)
-    candles_1h = load_symbol_candles_1h(symbol)
+    candles_5m = event.get("candles_5m") or []
+    candles_1h = event.get("candles_1h") or []
 
     if not candles_5m or not candles_1h:
         return
@@ -186,7 +181,7 @@ async def main():
 
     while True:
         try:
-            event = pop_bar_close_event(BAR_EVENT_BLOCK_TIMEOUT)
+            event = pop_bar_event_payload(BAR_EVENT_BLOCK_TIMEOUT)
             if not event:
                 await asyncio.sleep(0.2)
                 continue

@@ -16,11 +16,7 @@ from config import (
     REDIS_1H_LIMIT,
 )
 from mexc_client import get_contract_symbols, get_klines
-from redis_state import (
-    redis_ping,
-    save_symbol_bundle,
-    publish_bar_close,
-)
+from redis_state import redis_ping, push_bar_event_payload
 
 PING_INTERVAL_SECONDS = 15
 BOOTSTRAP_5M_LIMIT = 120
@@ -72,6 +68,9 @@ def iso_from_ts(ts_seconds: int) -> str:
 
 async def bootstrap_symbol(symbol: str):
     try:
+        if symbol in memory_5m and symbol in memory_1h:
+            return
+
         df_5m, df_1h = await asyncio.gather(
             asyncio.to_thread(get_klines, symbol, "Min5", BOOTSTRAP_5M_LIMIT),
             asyncio.to_thread(get_klines, symbol, "Min60", BOOTSTRAP_1H_LIMIT),
@@ -83,14 +82,6 @@ async def bootstrap_symbol(symbol: str):
         memory_5m[symbol] = candles_5m
         memory_1h[symbol] = candles_1h
 
-        state = {
-            "symbol": symbol,
-            "last_bootstrap": now_str(),
-            "last_closed_5m_bar": candles_5m[-2]["time"] if len(candles_5m) >= 2 else None,
-            "last_closed_1h_bar": candles_1h[-2]["time"] if len(candles_1h) >= 2 else None,
-        }
-
-        save_symbol_bundle(symbol, state, candles_5m, candles_1h)
         print(f"[{now_str()}] bootstrap ok | {symbol}", flush=True)
 
     except Exception as e:
@@ -134,28 +125,19 @@ def handle_kline_push(symbol: str, interval: str, data: dict):
         memory_5m[symbol] = updated
 
         if closed_bar_marker:
-            state = {
+            payload = {
                 "symbol": symbol,
-                "last_closed_5m_bar": closed_bar_marker,
-                "last_ingestor_update": now_str(),
+                "timeframe": "Min5",
+                "bar_marker": closed_bar_marker,
+                "candles_5m": updated,
+                "candles_1h": memory_1h.get(symbol, []),
             }
-
-            save_symbol_bundle(symbol, state, updated, None)
-            publish_bar_close(symbol, "Min5", closed_bar_marker)
+            push_bar_event_payload(payload)
 
     elif interval == "Min60":
         existing = memory_1h.get(symbol, [])
-        updated, closed_bar_marker = merge_candle(existing, candle, REDIS_1H_LIMIT)
+        updated, _ = merge_candle(existing, candle, REDIS_1H_LIMIT)
         memory_1h[symbol] = updated
-
-        if closed_bar_marker:
-            state = {
-                "symbol": symbol,
-                "last_closed_1h_bar": closed_bar_marker,
-                "last_ingestor_update": now_str(),
-            }
-
-            save_symbol_bundle(symbol, state, None, updated)
 
 
 async def subscribe_all(ws, symbols: list[str]):
@@ -233,7 +215,7 @@ async def ws_loop(symbols: list[str]):
 
         except Exception as e:
             print(f"[{now_str()}] ws reconnect after error | {e}", flush=True)
-            await asyncio.sleep(3)
+            await asyncio.sleep(5)
 
 
 async def main():
