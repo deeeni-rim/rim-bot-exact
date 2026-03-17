@@ -25,9 +25,7 @@ from redis_state import (
     load_symbol_candles_1h,
     set_signal_lock,
 )
-from signal_engine import (
-    process_symbol_for_user,
-)
+from signal_engine import process_symbol_for_user
 
 _users_cache = []
 _users_cache_at = 0.0
@@ -40,6 +38,22 @@ def now_str():
 def stable_partition(symbol: str, shard_count: int) -> int:
     h = hashlib.md5(symbol.encode("utf-8")).hexdigest()
     return int(h, 16) % shard_count
+
+
+def symbol_belongs_to_this_worker(symbol: str) -> bool:
+    return stable_partition(symbol, SIGNAL_SHARD_COUNT) == SIGNAL_SHARD_INDEX
+
+
+def get_users_cached():
+    global _users_cache, _users_cache_at
+
+    now_ts = time.time()
+    if _users_cache and (now_ts - _users_cache_at) < USERS_CACHE_SECONDS:
+        return _users_cache
+
+    _users_cache = get_all_active_users()
+    _users_cache_at = now_ts
+    return _users_cache
 
 
 def records_to_df(records: list[dict]) -> pd.DataFrame:
@@ -55,22 +69,6 @@ def records_to_df(records: list[dict]) -> pd.DataFrame:
     df = df.set_index("time")
     df = df.sort_index()
     return df
-
-
-def get_users_cached():
-    global _users_cache, _users_cache_at
-
-    now_ts = time.time()
-    if _users_cache and (now_ts - _users_cache_at) < USERS_CACHE_SECONDS:
-        return _users_cache
-
-    _users_cache = get_all_active_users()
-    _users_cache_at = now_ts
-    return _users_cache
-
-
-def symbol_belongs_to_this_worker(symbol: str) -> bool:
-    return stable_partition(symbol, SIGNAL_SHARD_COUNT) == SIGNAL_SHARD_INDEX
 
 
 async def process_bar_event(event: dict):
@@ -130,7 +128,6 @@ async def process_bar_event(event: dict):
             if not signal or not snapshot_meta:
                 continue
 
-            # Не дублируем один и тот же сигнал на пользователя
             locked = set_signal_lock(
                 user_id=user["telegram_id"],
                 symbol=symbol,

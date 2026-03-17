@@ -1,5 +1,4 @@
 import json
-import os
 from typing import Any, Optional
 
 from config import REDIS_URL
@@ -21,7 +20,7 @@ def _get_client():
     try:
         import redis
     except ImportError as e:
-        raise RuntimeError("redis package is not installed. Add redis to requirements.txt") from e
+        raise RuntimeError("redis package is not installed") from e
 
     _client = redis.Redis.from_url(REDIS_URL, decode_responses=True)
     return _client
@@ -32,23 +31,27 @@ def redis_ping() -> bool:
     return bool(client.ping())
 
 
-def set_json(key: str, value: Any, ex: Optional[int] = None):
-    client = _get_client()
-    payload = json.dumps(value, default=str)
-    client.set(key, payload, ex=ex)
+def _dumps(value: Any) -> str:
+    return json.dumps(value, default=str, separators=(",", ":"))
 
 
-def get_json(key: str) -> Optional[Any]:
-    client = _get_client()
-    raw = client.get(key)
+def _loads(raw: str | None) -> Optional[Any]:
     if not raw:
         return None
     return json.loads(raw)
 
 
-def delete_key(key: str):
+def set_json(key: str, value: Any, ex: Optional[int] = None):
     client = _get_client()
-    client.delete(key)
+    if ex is None:
+        client.set(key, _dumps(value))
+    else:
+        client.set(key, _dumps(value), ex=ex)
+
+
+def get_json(key: str) -> Optional[Any]:
+    client = _get_client()
+    return _loads(client.get(key))
 
 
 def rkey_symbol_state(symbol: str) -> str:
@@ -83,14 +86,6 @@ def load_symbol_candles(symbol: str, timeframe: str) -> Optional[list]:
     return get_json(rkey_symbol_candles(symbol, timeframe))
 
 
-def save_symbol_candles_5m(symbol: str, candles: list, ex: int = 86400):
-    save_symbol_candles(symbol, "5m", candles, ex=ex)
-
-
-def save_symbol_candles_1h(symbol: str, candles: list, ex: int = 86400):
-    save_symbol_candles(symbol, "1h", candles, ex=ex)
-
-
 def load_symbol_candles_5m(symbol: str) -> Optional[list]:
     return load_symbol_candles(symbol, "5m")
 
@@ -109,8 +104,11 @@ def publish_bar_close(symbol: str, timeframe: str, bar_marker: str, ttl_seconds:
     client = _get_client()
     lock_key = rkey_bar_event_lock(symbol, timeframe, bar_marker)
 
-    # Чтобы не публиковать одно и то же закрытие по много раз
-    locked = client.set(lock_key, "1", nx=True, ex=ttl_seconds)
+    pipe = client.pipeline()
+    pipe.set(lock_key, "1", nx=True, ex=ttl_seconds)
+    results = pipe.execute()
+
+    locked = bool(results[0])
     if not locked:
         return False
 
@@ -119,7 +117,7 @@ def publish_bar_close(symbol: str, timeframe: str, bar_marker: str, ttl_seconds:
         "timeframe": timeframe,
         "bar_marker": bar_marker,
     }
-    client.rpush(BAR_CLOSE_QUEUE_KEY, json.dumps(event))
+    client.rpush(BAR_CLOSE_QUEUE_KEY, _dumps(event))
     return True
 
 
@@ -128,6 +126,23 @@ def pop_bar_close_event(timeout_seconds: int = 5) -> Optional[dict]:
     item = client.blpop(BAR_CLOSE_QUEUE_KEY, timeout=timeout_seconds)
     if not item:
         return None
-
     _, raw = item
-    return json.loads(raw)
+    return _loads(raw)
+
+
+def save_symbol_bundle(symbol: str, state: dict, candles_5m: list | None, candles_1h: list | None, ex: int = 86400):
+    """
+    Один батч-запрос вместо нескольких отдельных.
+    """
+    client = _get_client()
+    pipe = client.pipeline()
+
+    pipe.set(rkey_symbol_state(symbol), _dumps(state), ex=ex)
+
+    if candles_5m is not None:
+        pipe.set(rkey_symbol_candles(symbol, "5m"), _dumps(candles_5m), ex=ex)
+
+    if candles_1h is not None:
+        pipe.set(rkey_symbol_candles(symbol, "1h"), _dumps(candles_1h), ex=ex)
+
+    pipe.execute()

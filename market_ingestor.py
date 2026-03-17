@@ -1,6 +1,6 @@
 import asyncio
-import json
 import hashlib
+import json
 from datetime import datetime, timezone
 
 import websockets
@@ -18,25 +18,21 @@ from config import (
 from mexc_client import get_contract_symbols, get_klines
 from redis_state import (
     redis_ping,
-    save_symbol_candles_5m,
-    save_symbol_candles_1h,
+    save_symbol_bundle,
     publish_bar_close,
-    load_symbol_candles_5m,
-    load_symbol_candles_1h,
 )
 
 PING_INTERVAL_SECONDS = 15
-BOOTSTRAP_5M_LIMIT = 140
-BOOTSTRAP_1H_LIMIT = 100
-SUBSCRIBE_BATCH_SLEEP = 0.02
+BOOTSTRAP_5M_LIMIT = 120
+BOOTSTRAP_1H_LIMIT = 80
+SUBSCRIBE_BATCH_SLEEP = 0.01
+
+memory_5m = {}
+memory_1h = {}
 
 
 def now_str():
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-
-def iso_from_ts(ts_seconds: int) -> str:
-    return datetime.fromtimestamp(ts_seconds, tz=timezone.utc).isoformat()
 
 
 def stable_partition(symbol: str, shard_count: int) -> int:
@@ -70,6 +66,10 @@ def df_to_records(df, limit: int):
     return out
 
 
+def iso_from_ts(ts_seconds: int) -> str:
+    return datetime.fromtimestamp(ts_seconds, tz=timezone.utc).isoformat()
+
+
 async def bootstrap_symbol(symbol: str):
     try:
         df_5m, df_1h = await asyncio.gather(
@@ -77,25 +77,27 @@ async def bootstrap_symbol(symbol: str):
             asyncio.to_thread(get_klines, symbol, "Min60", BOOTSTRAP_1H_LIMIT),
         )
 
-        if df_5m is not None and len(df_5m) > 0:
-            save_symbol_candles_5m(symbol, df_to_records(df_5m, REDIS_5M_LIMIT))
+        candles_5m = df_to_records(df_5m, REDIS_5M_LIMIT) if df_5m is not None and len(df_5m) > 0 else []
+        candles_1h = df_to_records(df_1h, REDIS_1H_LIMIT) if df_1h is not None and len(df_1h) > 0 else []
 
-        if df_1h is not None and len(df_1h) > 0:
-            save_symbol_candles_1h(symbol, df_to_records(df_1h, REDIS_1H_LIMIT))
+        memory_5m[symbol] = candles_5m
+        memory_1h[symbol] = candles_1h
 
+        state = {
+            "symbol": symbol,
+            "last_bootstrap": now_str(),
+            "last_closed_5m_bar": candles_5m[-2]["time"] if len(candles_5m) >= 2 else None,
+            "last_closed_1h_bar": candles_1h[-2]["time"] if len(candles_1h) >= 2 else None,
+        }
+
+        save_symbol_bundle(symbol, state, candles_5m, candles_1h)
         print(f"[{now_str()}] bootstrap ok | {symbol}", flush=True)
 
     except Exception as e:
         print(f"[{now_str()}] bootstrap error | {symbol} | {e}", flush=True)
 
 
-def _merge_candle(existing: list, candle: dict, max_len: int):
-    """
-    existing: список свечей [{time, open, high, low, close, vol}]
-    candle: новая/обновлённая свеча
-    Возвращает:
-      updated_list, closed_bar_marker_or_None
-    """
+def merge_candle(existing: list, candle: dict, max_len: int):
     if not existing:
         return [candle], None
 
@@ -103,28 +105,20 @@ def _merge_candle(existing: list, candle: dict, max_len: int):
     last_time = str(last["time"])
     new_time = str(candle["time"])
 
-    # апдейт текущей свечи
     if new_time == last_time:
         existing[-1] = candle
         return existing[-max_len:], None
 
-    # новая свеча => предыдущая закрылась
     if new_time > last_time:
         existing.append(candle)
         existing = existing[-max_len:]
-
-        closed_bar_marker = None
-        if len(existing) >= 2:
-            closed_bar_marker = str(existing[-2]["time"])
-
+        closed_bar_marker = str(existing[-2]["time"]) if len(existing) >= 2 else None
         return existing, closed_bar_marker
 
-    # старее последней — игнор
     return existing, None
 
 
 def handle_kline_push(symbol: str, interval: str, data: dict):
-    # В sample docs t = window start in seconds
     candle = {
         "time": iso_from_ts(int(data["t"])),
         "open": float(data["o"]),
@@ -135,17 +129,33 @@ def handle_kline_push(symbol: str, interval: str, data: dict):
     }
 
     if interval == "Min5":
-        existing = load_symbol_candles_5m(symbol) or []
-        updated, closed_bar_marker = _merge_candle(existing, candle, REDIS_5M_LIMIT)
-        save_symbol_candles_5m(symbol, updated)
+        existing = memory_5m.get(symbol, [])
+        updated, closed_bar_marker = merge_candle(existing, candle, REDIS_5M_LIMIT)
+        memory_5m[symbol] = updated
 
         if closed_bar_marker:
+            state = {
+                "symbol": symbol,
+                "last_closed_5m_bar": closed_bar_marker,
+                "last_ingestor_update": now_str(),
+            }
+
+            save_symbol_bundle(symbol, state, updated, None)
             publish_bar_close(symbol, "Min5", closed_bar_marker)
 
     elif interval == "Min60":
-        existing = load_symbol_candles_1h(symbol) or []
-        updated, _closed = _merge_candle(existing, candle, REDIS_1H_LIMIT)
-        save_symbol_candles_1h(symbol, updated)
+        existing = memory_1h.get(symbol, [])
+        updated, closed_bar_marker = merge_candle(existing, candle, REDIS_1H_LIMIT)
+        memory_1h[symbol] = updated
+
+        if closed_bar_marker:
+            state = {
+                "symbol": symbol,
+                "last_closed_1h_bar": closed_bar_marker,
+                "last_ingestor_update": now_str(),
+            }
+
+            save_symbol_bundle(symbol, state, None, updated)
 
 
 async def subscribe_all(ws, symbols: list[str]):
@@ -156,7 +166,6 @@ async def subscribe_all(ws, symbols: list[str]):
                 "symbol": symbol,
                 "interval": "Min5",
             },
-            "gzip": False,
         }
         msg_1h = {
             "method": "sub.kline",
@@ -164,7 +173,6 @@ async def subscribe_all(ws, symbols: list[str]):
                 "symbol": symbol,
                 "interval": "Min60",
             },
-            "gzip": False,
         }
 
         await ws.send(json.dumps(msg_5m))
@@ -187,7 +195,7 @@ async def ping_loop(ws):
 async def ws_loop(symbols: list[str]):
     while True:
         try:
-            print(f"[{now_str()}] connecting ws | {MEXC_FUTURES_WS}", flush=True)
+            print(f"[{now_str()}] connecting ws", flush=True)
 
             async with websockets.connect(
                 MEXC_FUTURES_WS,
@@ -230,13 +238,8 @@ async def ws_loop(symbols: list[str]):
 
 async def main():
     print("market_ingestor.py started", flush=True)
-
-    try:
-        redis_ping()
-        print(f"[{now_str()}] redis ok", flush=True)
-    except Exception as e:
-        print(f"[{now_str()}] redis error | {e}", flush=True)
-        raise
+    redis_ping()
+    print(f"[{now_str()}] redis ok", flush=True)
 
     symbols = load_symbols()
     symbols = shard_symbols(symbols, INGESTOR_SHARD_INDEX, INGESTOR_SHARD_COUNT)
@@ -247,7 +250,6 @@ async def main():
         flush=True,
     )
 
-    # bootstrap history
     semaphore = asyncio.Semaphore(20)
 
     async def _boot(sym):
@@ -255,8 +257,6 @@ async def main():
             await bootstrap_symbol(sym)
 
     await asyncio.gather(*[_boot(s) for s in symbols], return_exceptions=True)
-
-    # websocket live updates
     await ws_loop(symbols)
 
 
