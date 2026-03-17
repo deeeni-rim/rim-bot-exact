@@ -40,6 +40,8 @@ DEFAULTS = {
     "signals_enabled": True,
     "tp_rr": 1.0,
     "max_stop_pct": 3.0,
+    "stop_buffer_pct": 1.0,
+    "structure_sensitivity": 2,
 }
 
 
@@ -59,16 +61,18 @@ def main_menu_keyboard():
 def settings_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
-            [InlineKeyboardButton("LONG ON/OFF", callback_data="toggle_long")],
-            [InlineKeyboardButton("SHORT ON/OFF", callback_data="toggle_short")],
-            [InlineKeyboardButton("Сигналы ON/OFF", callback_data="toggle_signals")],
-            [InlineKeyboardButton("TP/RR", callback_data="edit_tp_rr")],
-            [InlineKeyboardButton("Макс. стоп %", callback_data="edit_max_stop")],
+            [InlineKeyboardButton("Режим", callback_data="edit_mode")],
+            [InlineKeyboardButton("Макс. стоп", callback_data="edit_max_stop")],
+            [InlineKeyboardButton("Тейк RR", callback_data="edit_tp_rr")],
+            [InlineKeyboardButton("Буфер стопа", callback_data="edit_stop_buffer")],
+            [InlineKeyboardButton("Чувствительность", callback_data="edit_sensitivity")],
+            [InlineKeyboardButton("Вкл/выкл сигналы", callback_data="toggle_signals")],
+            [InlineKeyboardButton("Мои настройки", callback_data="show_settings")],
         ]
     )
 
 
-def ensure_tables():
+def ensure_users_table():
     with get_conn() as conn:
         with conn.cursor() as cur:
             cur.execute(
@@ -81,9 +85,25 @@ def ensure_tables():
                     signals_enabled BOOLEAN DEFAULT TRUE,
                     tp_rr DOUBLE PRECISION DEFAULT 1.0,
                     max_stop_pct DOUBLE PRECISION DEFAULT 3.0,
+                    stop_buffer_pct DOUBLE PRECISION DEFAULT 1.0,
+                    structure_sensitivity INTEGER DEFAULT 2,
                     created_at TIMESTAMP DEFAULT NOW(),
                     updated_at TIMESTAMP DEFAULT NOW()
                 );
+                """
+            )
+            conn.commit()
+
+            cur.execute(
+                """
+                ALTER TABLE users
+                ADD COLUMN IF NOT EXISTS stop_buffer_pct DOUBLE PRECISION DEFAULT 1.0;
+                """
+            )
+            cur.execute(
+                """
+                ALTER TABLE users
+                ADD COLUMN IF NOT EXISTS structure_sensitivity INTEGER DEFAULT 2;
                 """
             )
             conn.commit()
@@ -95,10 +115,19 @@ def upsert_user(telegram_id: int, username: Optional[str]):
             cur.execute(
                 """
                 INSERT INTO users (
-                    telegram_id, username, enable_long, enable_short,
-                    signals_enabled, tp_rr, max_stop_pct, created_at, updated_at
+                    telegram_id,
+                    username,
+                    enable_long,
+                    enable_short,
+                    signals_enabled,
+                    tp_rr,
+                    max_stop_pct,
+                    stop_buffer_pct,
+                    structure_sensitivity,
+                    created_at,
+                    updated_at
                 )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, NOW(), NOW())
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, NOW(), NOW())
                 ON CONFLICT (telegram_id)
                 DO UPDATE SET
                     username = EXCLUDED.username,
@@ -112,6 +141,8 @@ def upsert_user(telegram_id: int, username: Optional[str]):
                     DEFAULTS["signals_enabled"],
                     DEFAULTS["tp_rr"],
                     DEFAULTS["max_stop_pct"],
+                    DEFAULTS["stop_buffer_pct"],
+                    DEFAULTS["structure_sensitivity"],
                 ),
             )
             conn.commit()
@@ -129,7 +160,9 @@ def get_user_settings(telegram_id: int) -> dict:
                     enable_short,
                     signals_enabled,
                     tp_rr,
-                    max_stop_pct
+                    max_stop_pct,
+                    stop_buffer_pct,
+                    structure_sensitivity
                 FROM users
                 WHERE telegram_id = %s
                 """,
@@ -137,7 +170,12 @@ def get_user_settings(telegram_id: int) -> dict:
             )
             row = cur.fetchone()
             if row:
-                return dict(row)
+                data = dict(row)
+                if data.get("stop_buffer_pct") is None:
+                    data["stop_buffer_pct"] = DEFAULTS["stop_buffer_pct"]
+                if data.get("structure_sensitivity") is None:
+                    data["structure_sensitivity"] = DEFAULTS["structure_sensitivity"]
+                return data
 
     return {
         "telegram_id": telegram_id,
@@ -147,7 +185,15 @@ def get_user_settings(telegram_id: int) -> dict:
 
 
 def update_user_field(telegram_id: int, field_name: str, value):
-    allowed = {"enable_long", "enable_short", "signals_enabled", "tp_rr", "max_stop_pct"}
+    allowed = {
+        "enable_long",
+        "enable_short",
+        "signals_enabled",
+        "tp_rr",
+        "max_stop_pct",
+        "stop_buffer_pct",
+        "structure_sensitivity",
+    }
     if field_name not in allowed:
         raise ValueError(f"field not allowed: {field_name}")
 
@@ -165,14 +211,29 @@ def update_user_field(telegram_id: int, field_name: str, value):
             conn.commit()
 
 
+def get_mode_text(settings: dict) -> str:
+    long_on = settings.get("enable_long", True)
+    short_on = settings.get("enable_short", True)
+
+    if long_on and short_on:
+        return "лонг + шорт"
+    if long_on and not short_on:
+        return "только лонг"
+    if not long_on and short_on:
+        return "только шорт"
+    return "всё выключено"
+
+
 def format_settings_text(settings: dict) -> str:
     return (
-        "⚙️ Настройки\n\n"
-        f"LONG: {'ON' if settings.get('enable_long') else 'OFF'}\n"
-        f"SHORT: {'ON' if settings.get('enable_short') else 'OFF'}\n"
-        f"Сигналы: {'ON' if settings.get('signals_enabled') else 'OFF'}\n"
-        f"TP/RR: {settings.get('tp_rr')}\n"
-        f"Макс. стоп: {settings.get('max_stop_pct')}%"
+        "Сохранено.\n\n"
+        "Твои настройки:\n\n"
+        f"Режим: {get_mode_text(settings)}\n"
+        f"Макс. стоп: {settings.get('max_stop_pct')}%\n"
+        f"Тейк RR: {settings.get('tp_rr')}R\n"
+        f"Буфер стопа: {settings.get('stop_buffer_pct')}%\n"
+        f"Чувствительность: {settings.get('structure_sensitivity')}\n"
+        f"Сигналы: {'включены' if settings.get('signals_enabled') else 'выключены'}"
     )
 
 
@@ -196,25 +257,16 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await send_settings(user.id, context)
 
 
-async def open_settings_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def settings_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await send_settings(update.effective_user.id, context)
 
 
 async def status_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     settings = get_user_settings(update.effective_user.id)
-    text = (
-        "📊 Статус\n\n"
-        f"LONG: {'ON' if settings.get('enable_long') else 'OFF'}\n"
-        f"SHORT: {'ON' if settings.get('enable_short') else 'OFF'}\n"
-        f"Сигналы: {'ON' if settings.get('signals_enabled') else 'OFF'}\n"
-        f"TP/RR: {settings.get('tp_rr')}\n"
-        f"Макс. стоп: {settings.get('max_stop_pct')}%"
+    await update.message.reply_text(
+        format_settings_text(settings),
+        reply_markup=main_menu_keyboard(),
     )
-    await update.message.reply_text(text, reply_markup=main_menu_keyboard())
-
-
-async def settings_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await send_settings(update.effective_user.id, context)
 
 
 async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -232,20 +284,81 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    if data == "toggle_long":
-        update_user_field(user_id, "enable_long", not settings.get("enable_long", True))
-    elif data == "toggle_short":
-        update_user_field(user_id, "enable_short", not settings.get("enable_short", True))
-    elif data == "toggle_signals":
+    if data == "show_settings":
+        await query.message.reply_text(
+            format_settings_text(settings),
+            reply_markup=settings_keyboard(),
+        )
+        return
+
+    if data == "toggle_signals":
         update_user_field(user_id, "signals_enabled", not settings.get("signals_enabled", True))
+        new_settings = get_user_settings(user_id)
+        await query.message.reply_text(
+            format_settings_text(new_settings),
+            reply_markup=settings_keyboard(),
+        )
+        return
+
+    if data == "edit_mode":
+        mode_keyboard = InlineKeyboardMarkup(
+            [
+                [InlineKeyboardButton("Лонг + Шорт", callback_data="mode_both")],
+                [InlineKeyboardButton("Только Лонг", callback_data="mode_long_only")],
+                [InlineKeyboardButton("Только Шорт", callback_data="mode_short_only")],
+                [InlineKeyboardButton("Всё Выкл", callback_data="mode_off")],
+            ]
+        )
+        await query.message.reply_text("Выбери режим:", reply_markup=mode_keyboard)
+        return
+
+    if data == "mode_both":
+        update_user_field(user_id, "enable_long", True)
+        update_user_field(user_id, "enable_short", True)
+
+    elif data == "mode_long_only":
+        update_user_field(user_id, "enable_long", True)
+        update_user_field(user_id, "enable_short", False)
+
+    elif data == "mode_short_only":
+        update_user_field(user_id, "enable_long", False)
+        update_user_field(user_id, "enable_short", True)
+
+    elif data == "mode_off":
+        update_user_field(user_id, "enable_long", False)
+        update_user_field(user_id, "enable_short", False)
+
     elif data == "edit_tp_rr":
         context.user_data["awaiting_input"] = "tp_rr"
-        await query.message.reply_text("Отправь новое значение TP/RR. Например: 1.5")
+        await query.message.reply_text("Отправь новое значение тейка RR. Например: 1.5")
         return
+
     elif data == "edit_max_stop":
         context.user_data["awaiting_input"] = "max_stop_pct"
         await query.message.reply_text("Отправь новый макс. стоп %. Например: 2.8")
         return
+
+    elif data == "edit_stop_buffer":
+        context.user_data["awaiting_input"] = "stop_buffer_pct"
+        await query.message.reply_text("Отправь новый буфер стопа %. Например: 1.0")
+        return
+
+    elif data == "edit_sensitivity":
+        sensitivity_keyboard = InlineKeyboardMarkup(
+            [
+                [InlineKeyboardButton("1", callback_data="sens_1")],
+                [InlineKeyboardButton("2", callback_data="sens_2")],
+                [InlineKeyboardButton("3", callback_data="sens_3")],
+                [InlineKeyboardButton("4", callback_data="sens_4")],
+            ]
+        )
+        await query.message.reply_text("Выбери чувствительность:", reply_markup=sensitivity_keyboard)
+        return
+
+    elif data.startswith("sens_"):
+        level = int(data.split("_")[1])
+        update_user_field(user_id, "structure_sensitivity", level)
+
     else:
         return
 
@@ -282,6 +395,12 @@ async def value_input_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
             return
         update_user_field(user_id, "max_stop_pct", value)
 
+    elif awaiting == "stop_buffer_pct":
+        if value < 0 or value > 100:
+            await update.message.reply_text("Буфер стопа должен быть в диапазоне 0–100.")
+            return
+        update_user_field(user_id, "stop_buffer_pct", value)
+
     context.user_data.pop("awaiting_input", None)
     await send_settings(user_id, context)
 
@@ -304,7 +423,7 @@ async def unknown_text_handler(update: Update, context: ContextTypes.DEFAULT_TYP
 
 
 def main():
-    ensure_tables()
+    ensure_users_table()
 
     app = Application.builder().token(BOT_TOKEN).build()
 
