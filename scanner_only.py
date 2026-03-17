@@ -172,22 +172,22 @@ async def scan_one_symbol(symbol, users, semaphore: asyncio.Semaphore):
                     except Exception as e:
                         print(f"[{now_str()}] redis save state error | {symbol} | {e}", flush=True)
 
-                upsert_user_symbol_state(
-                    {
-                        **trade_row if trade_row else {},
-                        **{
-                            "telegram_id": user["telegram_id"],
-                            "symbol": symbol,
-                            "in_trade": 1 if trade_state.in_trade else 0,
-                            "trade_dir": trade_state.trade_dir,
-                            "entry": trade_state.entry,
-                            "stop": trade_state.stop,
-                            "tp": trade_state.tp,
-                            "last_signature": trade_state.last_signature,
-                            "last_bar_marker": trade_state.last_bar_marker,
-                        }
-                    }
-                )
+base = trade_row if trade_row else {}
+
+upsert_user_symbol_state(
+    {
+        **base,
+        "telegram_id": user["telegram_id"],
+        "symbol": symbol,
+        "in_trade": 1 if trade_state.in_trade else 0,
+        "trade_dir": trade_state.trade_dir,
+        "entry": trade_state.entry,
+        "stop": trade_state.stop,
+        "tp": trade_state.tp,
+        "last_signature": trade_state.last_signature,
+        "last_bar_marker": trade_state.last_bar_marker,
+    }
+)
 
                 if not signal or not snapshot_meta:
                     continue
