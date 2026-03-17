@@ -11,17 +11,18 @@ FILTER_TIMEFRAME = os.getenv("FILTER_TIMEFRAME", "Min60")
 # Пауза между циклами
 SCAN_SLEEP_SECONDS = int(os.getenv("SCAN_SLEEP_SECONDS", "5"))
 
-# Автозагрузка всех символов
+# Автозагрузка символов
 AUTO_LOAD_SYMBOLS = os.getenv("AUTO_LOAD_SYMBOLS", "1") == "1"
 
-# Если выключишь автозагрузку
 MANUAL_SYMBOLS = [
     "BTC_USDT",
     "ETH_USDT",
 ]
 
-# Максимум автосимволов
 MAX_AUTO_SYMBOLS = int(os.getenv("MAX_AUTO_SYMBOLS", "1000"))
+
+# Redis
+REDIS_URL = os.getenv("REDIS_URL", "")
 
 # Скрытые настройки стратегии
 EMA_LEN = 50
