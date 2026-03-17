@@ -53,7 +53,6 @@ def main_menu_keyboard():
             ["⚙️ Настройки", "📊 Статус"],
         ],
         resize_keyboard=True,
-        persistent=True,
     )
 
 
