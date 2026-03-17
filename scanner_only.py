@@ -146,7 +146,7 @@ async def scan_one_symbol(symbol, users, semaphore: asyncio.Semaphore):
         if df_scan is None or df_filter is None:
             return 0, 0
 
-        # Сохраняем market state в Redis — это уже начало новой архитектуры
+        # Пишем рыночные данные в Redis
         try:
             save_symbol_candles_5m(symbol, df_to_records(df_scan))
             save_symbol_candles_1h(symbol, df_to_records(df_filter))
@@ -158,6 +158,7 @@ async def scan_one_symbol(symbol, users, semaphore: asyncio.Semaphore):
         for user in users:
             try:
                 trade_row = get_user_symbol_state(user["telegram_id"], symbol)
+                base = trade_row if trade_row else {}
 
                 signal, trade_state, snapshot_meta = process_symbol_for_user(
                     df_scan=df_scan,
@@ -172,22 +173,20 @@ async def scan_one_symbol(symbol, users, semaphore: asyncio.Semaphore):
                     except Exception as e:
                         print(f"[{now_str()}] redis save state error | {symbol} | {e}", flush=True)
 
-base = trade_row if trade_row else {}
-
-upsert_user_symbol_state(
-    {
-        **base,
-        "telegram_id": user["telegram_id"],
-        "symbol": symbol,
-        "in_trade": 1 if trade_state.in_trade else 0,
-        "trade_dir": trade_state.trade_dir,
-        "entry": trade_state.entry,
-        "stop": trade_state.stop,
-        "tp": trade_state.tp,
-        "last_signature": trade_state.last_signature,
-        "last_bar_marker": trade_state.last_bar_marker,
-    }
-)
+                upsert_user_symbol_state(
+                    {
+                        **base,
+                        "telegram_id": user["telegram_id"],
+                        "symbol": symbol,
+                        "in_trade": 1 if trade_state.in_trade else 0,
+                        "trade_dir": trade_state.trade_dir,
+                        "entry": trade_state.entry,
+                        "stop": trade_state.stop,
+                        "tp": trade_state.tp,
+                        "last_signature": trade_state.last_signature,
+                        "last_bar_marker": trade_state.last_bar_marker,
+                    }
+                )
 
                 if not signal or not snapshot_meta:
                     continue
