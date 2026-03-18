@@ -23,6 +23,9 @@ BOOTSTRAP_5M_LIMIT = 120
 BOOTSTRAP_1H_LIMIT = 80
 SUBSCRIBE_BATCH_SLEEP = 0.01
 
+REDIS_5M_TTL = 1800   # 30 минут
+REDIS_1H_TTL = 7200   # 2 часа
+
 memory_5m: dict[str, list[dict]] = {}
 memory_1h: dict[str, list[dict]] = {}
 
@@ -68,6 +71,29 @@ def iso_from_ts(ts_seconds: int) -> str:
     return datetime.fromtimestamp(ts_seconds, tz=timezone.utc).isoformat()
 
 
+def save_symbol_candles_to_redis(symbol: str):
+    try:
+        candles_5m = memory_5m.get(symbol, [])
+        candles_1h = memory_1h.get(symbol, [])
+
+        if candles_5m:
+            redis_client.set(
+                f"candles:{symbol}:5m",
+                json.dumps(candles_5m[-50:], ensure_ascii=False, separators=(",", ":")),
+                ex=REDIS_5M_TTL,
+            )
+
+        if candles_1h:
+            redis_client.set(
+                f"candles:{symbol}:1h",
+                json.dumps(candles_1h[-30:], ensure_ascii=False, separators=(",", ":")),
+                ex=REDIS_1H_TTL,
+            )
+
+    except Exception as e:
+        print(f"[{now_str()}] redis save candles error | {symbol} | {e}", flush=True)
+
+
 async def bootstrap_symbol(symbol: str):
     try:
         if (
@@ -97,19 +123,7 @@ async def bootstrap_symbol(symbol: str):
         memory_5m[symbol] = candles_5m
         memory_1h[symbol] = candles_1h
 
-        try:
-            redis_client.set(
-                f"candles:{symbol}:5m",
-                json.dumps(candles_5m[-50:], ensure_ascii=False, separators=(",", ":")),
-                ex=300,
-            )
-            redis_client.set(
-                f"candles:{symbol}:1h",
-                json.dumps(candles_1h[-30:], ensure_ascii=False, separators=(",", ":")),
-                ex=1800,
-            )
-        except Exception as e:
-            print(f"[{now_str()}] redis bootstrap save error | {symbol} | {e}", flush=True)
+        save_symbol_candles_to_redis(symbol)
 
         print(f"[{now_str()}] bootstrap ok | {symbol}", flush=True)
 
@@ -153,25 +167,9 @@ def handle_kline_push(symbol: str, interval: str, data: dict):
         updated, closed_bar_marker = merge_candle(existing, candle, REDIS_5M_LIMIT)
         memory_5m[symbol] = updated
 
-        try:
-            redis_client.set(
-                f"candles:{symbol}:5m",
-                json.dumps(updated[-50:], ensure_ascii=False, separators=(",", ":")),
-                ex=300,
-            )
-        except Exception as e:
-            print(f"[{now_str()}] redis save 5m error | {symbol} | {e}", flush=True)
+        save_symbol_candles_to_redis(symbol)
 
         if closed_bar_marker:
-            try:
-                redis_client.set(
-                    f"candles:{symbol}:1h",
-                    json.dumps(memory_1h.get(symbol, [])[-30:], ensure_ascii=False, separators=(",", ":")),
-                    ex=1800,
-                )
-            except Exception as e:
-                print(f"[{now_str()}] redis save 1h error | {symbol} | {e}", flush=True)
-
             payload = {
                 "symbol": symbol,
                 "timeframe": "Min5",
@@ -183,15 +181,7 @@ def handle_kline_push(symbol: str, interval: str, data: dict):
         existing = memory_1h.get(symbol, [])
         updated, _ = merge_candle(existing, candle, REDIS_1H_LIMIT)
         memory_1h[symbol] = updated
-
-        try:
-            redis_client.set(
-                f"candles:{symbol}:1h",
-                json.dumps(updated[-30:], ensure_ascii=False, separators=(",", ":")),
-                ex=1800,
-            )
-        except Exception as e:
-            print(f"[{now_str()}] redis save 1h error | {symbol} | {e}", flush=True)
+        save_symbol_candles_to_redis(symbol)
 
 
 async def subscribe_all(ws, symbols: list[str]):

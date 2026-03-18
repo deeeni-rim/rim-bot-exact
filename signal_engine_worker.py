@@ -91,115 +91,136 @@ def load_symbol_candles_from_redis(symbol: str):
 async def process_bar_event(event: dict):
     start_ts = time.perf_counter()
 
-    symbol = event["symbol"]
-    timeframe = event["timeframe"]
-    bar_marker = event["bar_marker"]
+    try:
+        symbol = event["symbol"]
+        timeframe = event["timeframe"]
+        bar_marker = event["bar_marker"]
 
-    if timeframe != "Min5":
-        return
+        if timeframe != "Min5":
+            return
 
-    if not symbol_belongs_to_this_worker(symbol):
-        return
+        if not symbol_belongs_to_this_worker(symbol):
+            return
 
-    candles_5m, candles_1h = load_symbol_candles_from_redis(symbol)
+        candles_5m, candles_1h = load_symbol_candles_from_redis(symbol)
 
-    if not candles_5m or not candles_1h:
-        print(f"[{now_str()}] empty candles from redis | {symbol}", flush=True)
-        return
+        if not candles_5m or not candles_1h:
+            print(f"[{now_str()}] redis miss | {symbol}", flush=True)
+            await asyncio.sleep(0.05)
+            return
 
-    df_scan = records_to_df(candles_5m)
-    df_filter = records_to_df(candles_1h)
+        df_scan = records_to_df(candles_5m)
+        df_filter = records_to_df(candles_1h)
 
-    if df_scan.empty or df_filter.empty:
-        return
+        if df_scan.empty or df_filter.empty:
+            return
 
-    if len(df_scan) < 10 or len(df_filter) < 20:
-        return
+        if len(df_scan) < 10 or len(df_filter) < 20:
+            return
 
-    users = get_users_cached()
-    queued_count = 0
+        users = get_users_cached()
+        queued_count = 0
 
-    for user in users:
+        for user in users:
+            try:
+                telegram_id = user["telegram_id"]
+                trade_row = get_user_symbol_state(telegram_id, symbol)
+
+                signal, trade_state, snapshot_meta = process_symbol_for_user(
+                    df_scan=df_scan,
+                    df_filter=df_filter,
+                    user=user,
+                    trade_row=trade_row,
+                )
+
+                base = trade_row if trade_row else {}
+
+                upsert_user_symbol_state(
+                    {
+                        **base,
+                        "telegram_id": telegram_id,
+                        "symbol": symbol,
+                        "in_trade": 1 if trade_state.in_trade else 0,
+                        "trade_dir": trade_state.trade_dir,
+                        "entry": trade_state.entry,
+                        "stop": trade_state.stop,
+                        "tp": trade_state.tp,
+                        "last_signature": trade_state.last_signature,
+                        "last_bar_marker": trade_state.last_bar_marker,
+                    }
+                )
+
+                if not signal or not snapshot_meta:
+                    continue
+
+                locked = set_signal_lock(
+                    user_id=telegram_id,
+                    symbol=symbol,
+                    side=signal.side,
+                    bar_marker=bar_marker,
+                    ttl_seconds=86400,
+                )
+                if not locked:
+                    continue
+
+                text = format_signal_message(
+                    symbol=symbol,
+                    side=signal.side.upper(),
+                    entry=signal.entry,
+                    stop=signal.stop,
+                    tp=signal.tp,
+                    risk_pct=signal.risk_pct,
+                    user_settings=user,
+                )
+
+                enqueue_outbound_message(
+                    telegram_id=telegram_id,
+                    symbol=symbol,
+                    side=signal.side.upper(),
+                    text=text,
+                    signal_key=f"{telegram_id}|{symbol}|{signal.side}|{bar_marker}",
+                    created_at=utc_now(),
+                )
+
+                queued_count += 1
+
+                print(
+                    f"[{now_str()}] REDIS SIGNAL {signal.side.upper()} | {symbol} | "
+                    f"user={telegram_id} | bar={bar_marker}",
+                    flush=True,
+                )
+
+            except Exception as e:
+                print(
+                    f"[{now_str()}] signal-worker error | {symbol} | user={user.get('telegram_id')} | {e}",
+                    flush=True,
+                )
+
+        elapsed = time.perf_counter() - start_ts
+        print(
+            f"[{now_str()}] event processed | {symbol} | bar={bar_marker} | "
+            f"queued={queued_count} | took={elapsed:.3f}s",
+            flush=True,
+        )
+
+    except Exception as e:
+        print(f"[{now_str()}] process_bar_event fatal | {e}", flush=True)
+
+
+async def event_worker(semaphore: asyncio.Semaphore):
+    while True:
         try:
-            telegram_id = user["telegram_id"]
-            trade_row = get_user_symbol_state(telegram_id, symbol)
-
-            signal, trade_state, snapshot_meta = process_symbol_for_user(
-                df_scan=df_scan,
-                df_filter=df_filter,
-                user=user,
-                trade_row=trade_row,
-            )
-
-            base = trade_row if trade_row else {}
-
-            upsert_user_symbol_state(
-                {
-                    **base,
-                    "telegram_id": telegram_id,
-                    "symbol": symbol,
-                    "in_trade": 1 if trade_state.in_trade else 0,
-                    "trade_dir": trade_state.trade_dir,
-                    "entry": trade_state.entry,
-                    "stop": trade_state.stop,
-                    "tp": trade_state.tp,
-                    "last_signature": trade_state.last_signature,
-                    "last_bar_marker": trade_state.last_bar_marker,
-                }
-            )
-
-            if not signal or not snapshot_meta:
+            event = pop_bar_event_payload(BAR_EVENT_BLOCK_TIMEOUT)
+            if not event:
+                await asyncio.sleep(0.05)
                 continue
 
-            locked = set_signal_lock(
-                user_id=telegram_id,
-                symbol=symbol,
-                side=signal.side,
-                bar_marker=bar_marker,
-                ttl_seconds=86400,
-            )
-            if not locked:
-                continue
-
-            text = format_signal_message(
-                symbol=symbol,
-                side=signal.side.upper(),
-                entry=signal.entry,
-                stop=signal.stop,
-                tp=signal.tp,
-                risk_pct=signal.risk_pct,
-                user_settings=user,
-            )
-
-            enqueue_outbound_message(
-                telegram_id=telegram_id,
-                symbol=symbol,
-                side=signal.side.upper(),
-                text=text,
-                signal_key=f"{telegram_id}|{symbol}|{signal.side}|{bar_marker}",
-                created_at=utc_now(),
-            )
-
-            queued_count += 1
-
-            print(
-                f"[{now_str()}] REDIS SIGNAL {signal.side.upper()} | {symbol} | "
-                f"user={telegram_id} | bar={bar_marker}",
-                flush=True,
-            )
+            async with semaphore:
+                await process_bar_event(event)
 
         except Exception as e:
-            print(
-                f"[{now_str()}] signal-worker error | {symbol} | user={user.get('telegram_id')} | {e}",
-                flush=True,
-            )
-
-    elapsed = time.perf_counter() - start_ts
-    print(
-        f"[{now_str()}] event processed | {symbol} | bar={bar_marker} | "
-        f"queued={queued_count} | took={elapsed:.3f}s",
-        flush=True,
-    )
+            print(f"[{now_str()}] event_worker error | {e}", flush=True)
+            await asyncio.sleep(0.2)
 
 
 async def main():
@@ -210,18 +231,10 @@ async def main():
         flush=True,
     )
 
-    while True:
-        try:
-            event = pop_bar_event_payload(BAR_EVENT_BLOCK_TIMEOUT)
-            if not event:
-                await asyncio.sleep(0.2)
-                continue
+    semaphore = asyncio.Semaphore(20)
 
-            await process_bar_event(event)
-
-        except Exception as e:
-            print(f"[{now_str()}] signal-engine fatal loop error | {e}", flush=True)
-            await asyncio.sleep(2)
+    workers = [event_worker(semaphore) for _ in range(10)]
+    await asyncio.gather(*workers)
 
 
 if __name__ == "__main__":
