@@ -147,26 +147,22 @@ def fetch_symbols_auto() -> list[str]:
         if not symbol:
             continue
 
+        # Берем все USDT-фьючерсы
         if not symbol.endswith("_USDT"):
             continue
 
+        # Только активные
         state = row.get("state")
         if state not in (0, "0", None):
-            continue
-
-        api_allowed = row.get("apiAllowed")
-        if api_allowed is False:
-            continue
-
-        settle = (row.get("settleCoin") or row.get("quoteCoin") or "").upper()
-        if settle and settle != "USDT":
             continue
 
         result.append(symbol)
 
     result = sorted(set(result))
+
     if MAX_AUTO_SYMBOLS > 0:
         result = result[:MAX_AUTO_SYMBOLS]
+
     return result
 
 
@@ -363,6 +359,7 @@ async def ws_loop(symbols: list[str]):
                 ping_timeout=None,
                 close_timeout=5,
                 max_queue=None,
+                compression=None,
             ) as ws:
                 print(f"[{now_str()}] ws connected", flush=True)
 
