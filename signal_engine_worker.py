@@ -2,6 +2,7 @@ import asyncio
 import hashlib
 import json
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 
 import pandas as pd
@@ -111,16 +112,16 @@ def process_bar_event_sync(event: dict):
             return
 
         if len(df5) < 10 or len(df1h) < 20:
-            print(f"[{now_str()}] not enough candles | {symbol} | 5m={len(df5)} 1h={len(df1h)}", flush=True)
+            print(
+                f"[{now_str()}] not enough candles | {symbol} | 5m={len(df5)} 1h={len(df1h)}",
+                flush=True,
+            )
             return
 
         users = get_users_cached()
         states = get_states_for_symbol(symbol)
 
-        updates = []
-        queued = 0
-
-        for user in users:
+        def process_user(user):
             try:
                 uid = user["telegram_id"]
                 trade_row = states.get(uid)
@@ -132,7 +133,7 @@ def process_bar_event_sync(event: dict):
                     trade_row=trade_row,
                 )
 
-                updates.append({
+                update = {
                     "telegram_id": uid,
                     "symbol": symbol,
                     "in_trade": int(trade_state.in_trade),
@@ -142,46 +143,58 @@ def process_bar_event_sync(event: dict):
                     "tp": trade_state.tp,
                     "last_signature": trade_state.last_signature,
                     "last_bar_marker": trade_state.last_bar_marker,
-                })
+                }
 
-                if not signal or not snapshot:
-                    continue
+                queued_local = 0
 
-                if not set_signal_lock(
-                    user_id=uid,
-                    symbol=symbol,
-                    side=signal.side,
-                    bar_marker=bar_marker,
-                    ttl_seconds=86400,
-                ):
-                    continue
+                if signal and snapshot:
+                    if set_signal_lock(
+                        user_id=uid,
+                        symbol=symbol,
+                        side=signal.side,
+                        bar_marker=bar_marker,
+                        ttl_seconds=86400,
+                    ):
+                        text = format_signal_message(
+                            symbol=symbol,
+                            side=signal.side.upper(),
+                            entry=signal.entry,
+                            stop=signal.stop,
+                            tp=signal.tp,
+                            risk_pct=signal.risk_pct,
+                            user_settings=user,
+                        )
 
-                text = format_signal_message(
-                    symbol=symbol,
-                    side=signal.side.upper(),
-                    entry=signal.entry,
-                    stop=signal.stop,
-                    tp=signal.tp,
-                    risk_pct=signal.risk_pct,
-                    user_settings=user,
-                )
+                        enqueue_outbound_message(
+                            telegram_id=uid,
+                            symbol=symbol,
+                            side=signal.side.upper(),
+                            text=text,
+                            signal_key=f"{uid}|{symbol}|{signal.side}|{bar_marker}",
+                            created_at=utc_now(),
+                        )
 
-                enqueue_outbound_message(
-                    telegram_id=uid,
-                    symbol=symbol,
-                    side=signal.side.upper(),
-                    text=text,
-                    signal_key=f"{uid}|{symbol}|{signal.side}|{bar_marker}",
-                    created_at=utc_now(),
-                )
+                        queued_local = 1
 
-                queued += 1
+                return update, queued_local
 
             except Exception as e:
                 print(
                     f"[{now_str()}] signal-worker user error | {symbol} | user={user.get('telegram_id')} | {e}",
                     flush=True,
                 )
+                return None, 0
+
+        updates = []
+        queued = 0
+
+        with ThreadPoolExecutor(max_workers=10) as executor:
+            results = list(executor.map(process_user, users))
+
+        for upd, q in results:
+            if upd:
+                updates.append(upd)
+            queued += q
 
         upsert_states_batch(updates)
 
