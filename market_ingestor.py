@@ -71,7 +71,12 @@ def iso_from_ts(ts_seconds: int) -> str:
 
 async def bootstrap_symbol(symbol: str):
     try:
-        if symbol in memory_5m and len(memory_5m[symbol]) > 50 and symbol in memory_1h and len(memory_1h[symbol]) > 20:
+        if (
+            symbol in memory_5m
+            and len(memory_5m[symbol]) > 50
+            and symbol in memory_1h
+            and len(memory_1h[symbol]) > 20
+        ):
             return
 
         df_5m, df_1h = await asyncio.gather(
@@ -79,8 +84,16 @@ async def bootstrap_symbol(symbol: str):
             asyncio.to_thread(get_klines, symbol, "Min60", BOOTSTRAP_1H_LIMIT),
         )
 
-        candles_5m = df_to_records(df_5m, REDIS_5M_LIMIT) if df_5m is not None and len(df_5m) > 0 else []
-        candles_1h = df_to_records(df_1h, REDIS_1H_LIMIT) if df_1h is not None and len(df_1h) > 0 else []
+        candles_5m = (
+            df_to_records(df_5m, REDIS_5M_LIMIT)
+            if df_5m is not None and len(df_5m) > 0
+            else []
+        )
+        candles_1h = (
+            df_to_records(df_1h, REDIS_1H_LIMIT)
+            if df_1h is not None and len(df_1h) > 0
+            else []
+        )
 
         memory_5m[symbol] = candles_5m
         memory_1h[symbol] = candles_1h
@@ -132,8 +145,8 @@ def handle_kline_push(symbol: str, interval: str, data: dict):
                 "symbol": symbol,
                 "timeframe": "Min5",
                 "bar_marker": closed_bar_marker,
-                "candles_5m": updated[-30:]
-                "candles_1h": memory_1h.get(symbol, [])[-20:]
+                "candles_5m": updated[-20:],
+                "candles_1h": memory_1h.get(symbol, [])[-10:],
             }
             push_bar_event_payload(payload)
 
@@ -162,6 +175,7 @@ async def subscribe_all(ws, symbols: list[str]):
 
         await ws.send(json.dumps(msg_5m))
         await asyncio.sleep(SUBSCRIBE_BATCH_SLEEP)
+
         await ws.send(json.dumps(msg_1h))
         await asyncio.sleep(SUBSCRIBE_BATCH_SLEEP)
 
