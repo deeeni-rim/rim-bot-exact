@@ -207,34 +207,42 @@ async def process_bar_event(event: dict):
         print(f"[{now_str()}] process_bar_event fatal | {e}", flush=True)
 
 
-async def event_worker(semaphore: asyncio.Semaphore):
+async def run_event(event: dict, semaphore: asyncio.Semaphore):
+    async with semaphore:
+        await process_bar_event(event)
+
+
+async def dispatcher_loop(semaphore: asyncio.Semaphore):
     while True:
         try:
             event = pop_bar_event_payload(BAR_EVENT_BLOCK_TIMEOUT)
+
             if not event:
-                await asyncio.sleep(0.05)
+                await asyncio.sleep(0.01)
                 continue
 
-            async with semaphore:
-                await process_bar_event(event)
+            # не блокируем цикл
+            asyncio.create_task(run_event(event, semaphore))
 
         except Exception as e:
-            print(f"[{now_str()}] event_worker error | {e}", flush=True)
-            await asyncio.sleep(0.2)
+            print(f"[{now_str()}] dispatcher error | {e}", flush=True)
+            await asyncio.sleep(0.1)
 
 
 async def main():
     print("signal_engine_worker.py started", flush=True)
     init_db()
+
     print(
-        f"[{now_str()}] signal shard | index={SIGNAL_SHARD_INDEX} count={SIGNAL_SHARD_COUNT}",
+        f"[{now_str()}] signal shard | index={SIGNAL_SHARD_INDEX} "
+        f"count={SIGNAL_SHARD_COUNT}",
         flush=True,
     )
 
     semaphore = asyncio.Semaphore(20)
 
-    workers = [event_worker(semaphore) for _ in range(10)]
-    await asyncio.gather(*workers)
+    # один диспетчер, который спавнит задачи
+    await dispatcher_loop(semaphore)
 
 
 if __name__ == "__main__":
