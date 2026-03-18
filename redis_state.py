@@ -22,9 +22,11 @@ def _get_client():
     return _client
 
 
+redis_client = _get_client()
+
+
 def redis_ping() -> bool:
-    client = _get_client()
-    return bool(client.ping())
+    return bool(redis_client.ping())
 
 
 def _dumps(value: Any) -> str:
@@ -48,19 +50,16 @@ def set_signal_lock(
     bar_marker: str,
     ttl_seconds: int = 86400,
 ) -> bool:
-    client = _get_client()
     key = rkey_signal_lock(user_id, symbol, side, bar_marker)
-    return bool(client.set(key, "1", nx=True, ex=ttl_seconds))
+    return bool(redis_client.set(key, "1", nx=True, ex=ttl_seconds))
 
 
 def push_bar_event_payload(payload: dict):
-    client = _get_client()
-    client.rpush(BAR_CLOSE_QUEUE_KEY, _dumps(payload))
+    redis_client.rpush(BAR_CLOSE_QUEUE_KEY, _dumps(payload))
 
 
 def pop_bar_event_payload(timeout_seconds: int = 5) -> Optional[dict]:
-    client = _get_client()
-    item = client.blpop(BAR_CLOSE_QUEUE_KEY, timeout=timeout_seconds)
+    item = redis_client.blpop(BAR_CLOSE_QUEUE_KEY, timeout=timeout_seconds)
     if not item:
         return None
 

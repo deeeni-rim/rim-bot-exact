@@ -1,5 +1,6 @@
 import asyncio
 import hashlib
+import json
 import time
 from datetime import datetime
 
@@ -19,20 +20,12 @@ from db import (
     enqueue_outbound_message,
     utc_now,
 )
-from mexc_client import get_klines
-from redis_state import pop_bar_event_payload, set_signal_lock
+from redis_state import pop_bar_event_payload, set_signal_lock, redis_client
 from signal_engine import process_symbol_for_user
 from bot_ui import format_signal_message
 
-
 _users_cache = []
 _users_cache_at = 0.0
-
-memory_5m: dict[str, list[dict]] = {}
-memory_1h: dict[str, list[dict]] = {}
-
-BOOTSTRAP_5M_LIMIT = 120
-BOOTSTRAP_1H_LIMIT = 80
 
 
 def now_str() -> str:
@@ -60,22 +53,6 @@ def get_users_cached():
     return _users_cache
 
 
-def df_to_records(df, limit: int) -> list[dict]:
-    out = []
-    for idx, row in df.tail(limit).iterrows():
-        out.append(
-            {
-                "time": str(idx),
-                "open": float(row["open"]),
-                "high": float(row["high"]),
-                "low": float(row["low"]),
-                "close": float(row["close"]),
-                "vol": float(row["vol"]) if "vol" in row else 0.0,
-            }
-        )
-    return out
-
-
 def records_to_df(records: list[dict]) -> pd.DataFrame:
     df = pd.DataFrame(records)
     if df.empty:
@@ -94,64 +71,21 @@ def records_to_df(records: list[dict]) -> pd.DataFrame:
     return df
 
 
-async def bootstrap_symbol(symbol: str):
+def load_symbol_candles_from_redis(symbol: str):
     try:
-        if (
-            symbol in memory_5m
-            and len(memory_5m[symbol]) >= 50
-            and symbol in memory_1h
-            and len(memory_1h[symbol]) >= 20
-        ):
-            return
+        candles_5m_raw = redis_client.get(f"candles:{symbol}:5m")
+        candles_1h_raw = redis_client.get(f"candles:{symbol}:1h")
 
-        df_5m, df_1h = await asyncio.gather(
-            asyncio.to_thread(get_klines, symbol, "Min5", BOOTSTRAP_5M_LIMIT),
-            asyncio.to_thread(get_klines, symbol, "Min60", BOOTSTRAP_1H_LIMIT),
-        )
+        if not candles_5m_raw or not candles_1h_raw:
+            return [], []
 
-        candles_5m = (
-            df_to_records(df_5m, BOOTSTRAP_5M_LIMIT)
-            if df_5m is not None and len(df_5m) > 0
-            else []
-        )
-        candles_1h = (
-            df_to_records(df_1h, BOOTSTRAP_1H_LIMIT)
-            if df_1h is not None and len(df_1h) > 0
-            else []
-        )
-
-        memory_5m[symbol] = candles_5m
-        memory_1h[symbol] = candles_1h
-
-        print(f"[{now_str()}] signal bootstrap ok | {symbol}", flush=True)
+        candles_5m = json.loads(candles_5m_raw)
+        candles_1h = json.loads(candles_1h_raw)
+        return candles_5m, candles_1h
 
     except Exception as e:
-        print(f"[{now_str()}] signal bootstrap error | {symbol} | {e}", flush=True)
-
-
-async def refresh_symbol_cache(symbol: str):
-    try:
-        df_5m, df_1h = await asyncio.gather(
-            asyncio.to_thread(get_klines, symbol, "Min5", BOOTSTRAP_5M_LIMIT),
-            asyncio.to_thread(get_klines, symbol, "Min60", BOOTSTRAP_1H_LIMIT),
-        )
-
-        candles_5m = (
-            df_to_records(df_5m, BOOTSTRAP_5M_LIMIT)
-            if df_5m is not None and len(df_5m) > 0
-            else []
-        )
-        candles_1h = (
-            df_to_records(df_1h, BOOTSTRAP_1H_LIMIT)
-            if df_1h is not None and len(df_1h) > 0
-            else []
-        )
-
-        memory_5m[symbol] = candles_5m
-        memory_1h[symbol] = candles_1h
-
-    except Exception as e:
-        print(f"[{now_str()}] refresh_symbol_cache error | {symbol} | {e}", flush=True)
+        print(f"[{now_str()}] redis load candles error | {symbol} | {e}", flush=True)
+        return [], []
 
 
 async def process_bar_event(event: dict):
@@ -167,12 +101,10 @@ async def process_bar_event(event: dict):
     if not symbol_belongs_to_this_worker(symbol):
         return
 
-    await refresh_symbol_cache(symbol)
-
-    candles_5m = memory_5m.get(symbol, [])
-    candles_1h = memory_1h.get(symbol, [])
+    candles_5m, candles_1h = load_symbol_candles_from_redis(symbol)
 
     if not candles_5m or not candles_1h:
+        print(f"[{now_str()}] empty candles from redis | {symbol}", flush=True)
         return
 
     df_scan = records_to_df(candles_5m)
