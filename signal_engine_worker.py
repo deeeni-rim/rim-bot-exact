@@ -19,12 +19,20 @@ from db import (
     enqueue_outbound_message,
     utc_now,
 )
+from mexc_client import get_klines
 from redis_state import pop_bar_event_payload, set_signal_lock
 from signal_engine import process_symbol_for_user
+from bot_ui import format_signal_message
 
 
 _users_cache = []
 _users_cache_at = 0.0
+
+memory_5m: dict[str, list[dict]] = {}
+memory_1h: dict[str, list[dict]] = {}
+
+BOOTSTRAP_5M_LIMIT = 120
+BOOTSTRAP_1H_LIMIT = 80
 
 
 def now_str() -> str:
@@ -52,6 +60,22 @@ def get_users_cached():
     return _users_cache
 
 
+def df_to_records(df, limit: int) -> list[dict]:
+    out = []
+    for idx, row in df.tail(limit).iterrows():
+        out.append(
+            {
+                "time": str(idx),
+                "open": float(row["open"]),
+                "high": float(row["high"]),
+                "low": float(row["low"]),
+                "close": float(row["close"]),
+                "vol": float(row["vol"]) if "vol" in row else 0.0,
+            }
+        )
+    return out
+
+
 def records_to_df(records: list[dict]) -> pd.DataFrame:
     df = pd.DataFrame(records)
     if df.empty:
@@ -70,74 +94,69 @@ def records_to_df(records: list[dict]) -> pd.DataFrame:
     return df
 
 
-def symbol_to_tv(symbol: str) -> str:
-    clean = symbol.replace("_", "")
-    return f"https://www.tradingview.com/chart/?symbol=MEXC:{clean}"
+async def bootstrap_symbol(symbol: str):
+    try:
+        if (
+            symbol in memory_5m
+            and len(memory_5m[symbol]) >= 50
+            and symbol in memory_1h
+            and len(memory_1h[symbol]) >= 20
+        ):
+            return
+
+        df_5m, df_1h = await asyncio.gather(
+            asyncio.to_thread(get_klines, symbol, "Min5", BOOTSTRAP_5M_LIMIT),
+            asyncio.to_thread(get_klines, symbol, "Min60", BOOTSTRAP_1H_LIMIT),
+        )
+
+        candles_5m = (
+            df_to_records(df_5m, BOOTSTRAP_5M_LIMIT)
+            if df_5m is not None and len(df_5m) > 0
+            else []
+        )
+        candles_1h = (
+            df_to_records(df_1h, BOOTSTRAP_1H_LIMIT)
+            if df_1h is not None and len(df_1h) > 0
+            else []
+        )
+
+        memory_5m[symbol] = candles_5m
+        memory_1h[symbol] = candles_1h
+
+        print(f"[{now_str()}] signal bootstrap ok | {symbol}", flush=True)
+
+    except Exception as e:
+        print(f"[{now_str()}] signal bootstrap error | {symbol} | {e}", flush=True)
 
 
-def symbol_to_mexc(symbol: str) -> str:
-    return f"https://futures.mexc.com/exchange/{symbol}?type=linear_swap"
+async def refresh_symbol_cache(symbol: str):
+    try:
+        df_5m, df_1h = await asyncio.gather(
+            asyncio.to_thread(get_klines, symbol, "Min5", BOOTSTRAP_5M_LIMIT),
+            asyncio.to_thread(get_klines, symbol, "Min60", BOOTSTRAP_1H_LIMIT),
+        )
 
+        candles_5m = (
+            df_to_records(df_5m, BOOTSTRAP_5M_LIMIT)
+            if df_5m is not None and len(df_5m) > 0
+            else []
+        )
+        candles_1h = (
+            df_to_records(df_1h, BOOTSTRAP_1H_LIMIT)
+            if df_1h is not None and len(df_1h) > 0
+            else []
+        )
 
-def format_signal_message(
-    symbol: str,
-    side: str,
-    entry: float,
-    stop: float,
-    tp: float,
-    risk_pct: float,
-    user_settings: dict | None = None,
-) -> str:
-    side_upper = side.upper()
-    emoji = "🟢" if side_upper == "LONG" else "🔴"
+        memory_5m[symbol] = candles_5m
+        memory_1h[symbol] = candles_1h
 
-    tp_rr = None
-    max_stop_pct = None
-    enable_long = None
-    enable_short = None
-
-    if user_settings:
-        tp_rr = user_settings.get("tp_rr")
-        max_stop_pct = user_settings.get("max_stop_pct")
-        enable_long = user_settings.get("enable_long")
-        enable_short = user_settings.get("enable_short")
-
-    lines = [
-        f"{emoji} {side_upper} SIGNAL",
-        "",
-        f"Монета: {symbol}",
-        "Таймфрейм: 5m",
-        f"Вход: {entry:.8f}",
-        f"Стоп: {stop:.8f}",
-        f"Тейк: {tp:.8f}",
-        f"Риск: {risk_pct:.2f}%",
-    ]
-
-    if tp_rr is not None or max_stop_pct is not None or enable_long is not None or enable_short is not None:
-        lines.extend(["", "Настройки пользователя:"])
-        if tp_rr is not None:
-            lines.append(f"TP/RR: {tp_rr}")
-        if max_stop_pct is not None:
-            lines.append(f"Макс. стоп: {max_stop_pct}%")
-        if enable_long is not None:
-            lines.append(f"LONG: {'ON' if enable_long else 'OFF'}")
-        if enable_short is not None:
-            lines.append(f"SHORT: {'ON' if enable_short else 'OFF'}")
-
-    lines.extend(
-        [
-            "",
-            f"TV: {symbol_to_tv(symbol)}",
-            f"MEXC: {symbol_to_mexc(symbol)}",
-            "",
-            f"Время: {datetime.utcnow().strftime('%d.%m.%Y %H:%M UTC')}",
-        ]
-    )
-
-    return "\n".join(lines)
+    except Exception as e:
+        print(f"[{now_str()}] refresh_symbol_cache error | {symbol} | {e}", flush=True)
 
 
 async def process_bar_event(event: dict):
+    start_ts = time.perf_counter()
+
     symbol = event["symbol"]
     timeframe = event["timeframe"]
     bar_marker = event["bar_marker"]
@@ -148,8 +167,10 @@ async def process_bar_event(event: dict):
     if not symbol_belongs_to_this_worker(symbol):
         return
 
-    candles_5m = event.get("candles_5m") or []
-    candles_1h = event.get("candles_1h") or []
+    await refresh_symbol_cache(symbol)
+
+    candles_5m = memory_5m.get(symbol, [])
+    candles_1h = memory_1h.get(symbol, [])
 
     if not candles_5m or not candles_1h:
         return
@@ -241,11 +262,12 @@ async def process_bar_event(event: dict):
                 flush=True,
             )
 
-    if queued_count > 0:
-        print(
-            f"[{now_str()}] queued from redis event | {symbol} | count={queued_count} | bar={bar_marker}",
-            flush=True,
-        )
+    elapsed = time.perf_counter() - start_ts
+    print(
+        f"[{now_str()}] event processed | {symbol} | bar={bar_marker} | "
+        f"queued={queued_count} | took={elapsed:.3f}s",
+        flush=True,
+    )
 
 
 async def main():

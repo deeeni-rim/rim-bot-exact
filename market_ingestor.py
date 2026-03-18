@@ -41,7 +41,6 @@ def load_symbols() -> list[str]:
         symbols = get_contract_symbols(MAX_AUTO_SYMBOLS)
     else:
         symbols = MANUAL_SYMBOLS
-
     return sorted(set(symbols))
 
 
@@ -145,8 +144,6 @@ def handle_kline_push(symbol: str, interval: str, data: dict):
                 "symbol": symbol,
                 "timeframe": "Min5",
                 "bar_marker": closed_bar_marker,
-                "candles_5m": updated[-20:],
-                "candles_1h": memory_1h.get(symbol, [])[-10:],
             }
             push_bar_event_payload(payload)
 
@@ -175,7 +172,6 @@ async def subscribe_all(ws, symbols: list[str]):
 
         await ws.send(json.dumps(msg_5m))
         await asyncio.sleep(SUBSCRIBE_BATCH_SLEEP)
-
         await ws.send(json.dumps(msg_1h))
         await asyncio.sleep(SUBSCRIBE_BATCH_SLEEP)
 
