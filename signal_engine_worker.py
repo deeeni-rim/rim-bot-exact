@@ -88,7 +88,7 @@ def load_symbol_candles_from_redis(symbol: str):
         return [], []
 
 
-async def process_bar_event(event: dict):
+def process_bar_event_sync(event: dict):
     start_ts = time.perf_counter()
 
     try:
@@ -106,7 +106,6 @@ async def process_bar_event(event: dict):
 
         if not candles_5m or not candles_1h:
             print(f"[{now_str()}] redis miss | {symbol}", flush=True)
-            await asyncio.sleep(0.05)
             return
 
         df_scan = records_to_df(candles_5m)
@@ -209,19 +208,21 @@ async def process_bar_event(event: dict):
 
 async def run_event(event: dict, semaphore: asyncio.Semaphore):
     async with semaphore:
-        await process_bar_event(event)
+        await asyncio.to_thread(process_bar_event_sync, event)
 
 
 async def dispatcher_loop(semaphore: asyncio.Semaphore):
     while True:
         try:
-            event = pop_bar_event_payload(BAR_EVENT_BLOCK_TIMEOUT)
+            event = await asyncio.to_thread(
+                pop_bar_event_payload,
+                BAR_EVENT_BLOCK_TIMEOUT,
+            )
 
             if not event:
                 await asyncio.sleep(0.01)
                 continue
 
-            # не блокируем цикл
             asyncio.create_task(run_event(event, semaphore))
 
         except Exception as e:
@@ -239,9 +240,9 @@ async def main():
         flush=True,
     )
 
+    # Можно потом поднять до 30, но сначала проверим на 20
     semaphore = asyncio.Semaphore(20)
 
-    # один диспетчер, который спавнит задачи
     await dispatcher_loop(semaphore)
 
 
