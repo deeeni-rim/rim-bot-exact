@@ -29,11 +29,11 @@ _users_cache_at = 0.0
 
 
 def now_str():
-    return datetime.now().strftime("%H:%M:%S")
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
 def stable_partition(symbol: str, shard_count: int) -> int:
-    h = hashlib.md5(symbol.encode()).hexdigest()
+    h = hashlib.md5(symbol.encode("utf-8")).hexdigest()
     return int(h, 16) % shard_count
 
 
@@ -44,16 +44,16 @@ def symbol_belongs_to_this_worker(symbol: str) -> bool:
 def get_users_cached():
     global _users_cache, _users_cache_at
 
-    now = time.time()
-    if _users_cache and (now - _users_cache_at) < USERS_CACHE_SECONDS:
+    now_ts = time.time()
+    if _users_cache and (now_ts - _users_cache_at) < USERS_CACHE_SECONDS:
         return _users_cache
 
     _users_cache = get_all_active_users()
-    _users_cache_at = now
+    _users_cache_at = now_ts
     return _users_cache
 
 
-def load_candles(symbol):
+def load_candles(symbol: str):
     try:
         c5 = redis_client.get(f"candles:{symbol}:5m")
         c1h = redis_client.get(f"candles:{symbol}:1h")
@@ -62,7 +62,8 @@ def load_candles(symbol):
             return None, None
 
         return json.loads(c5), json.loads(c1h)
-    except:
+    except Exception as e:
+        print(f"[{now_str()}] redis load candles error | {symbol} | {e}", flush=True)
         return None, None
 
 
@@ -71,128 +72,163 @@ def to_df(data):
     if df.empty:
         return df
 
-    df["time"] = pd.to_datetime(df["time"])
+    df["time"] = pd.to_datetime(df["time"], errors="coerce")
+    df = df.dropna(subset=["time"]).copy()
+
+    for col in ["open", "high", "low", "close", "vol"]:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    df = df.dropna(subset=["open", "high", "low", "close"]).copy()
     df = df.set_index("time").sort_index()
     return df
 
 
-def process_bar_event_sync(event):
+def process_bar_event_sync(event: dict):
     start = time.perf_counter()
 
-    symbol = event["symbol"]
-    timeframe = event["timeframe"]
-    bar_marker = event["bar_marker"]
+    try:
+        symbol = event["symbol"]
+        timeframe = event["timeframe"]
+        bar_marker = event["bar_marker"]
 
-    if timeframe != "Min5":
-        return
+        if timeframe != "Min5":
+            return
 
-    if not symbol_belongs_to_this_worker(symbol):
-        return
+        if not symbol_belongs_to_this_worker(symbol):
+            return
 
-    c5, c1h = load_candles(symbol)
-    if not c5 or not c1h:
-        return
+        c5, c1h = load_candles(symbol)
+        if not c5 or not c1h:
+            print(f"[{now_str()}] redis miss | {symbol}", flush=True)
+            return
 
-    df5 = to_df(c5)
-    df1h = to_df(c1h)
+        df5 = to_df(c5)
+        df1h = to_df(c1h)
 
-    if len(df5) < 10 or len(df1h) < 20:
-        return
+        if df5.empty or df1h.empty:
+            print(f"[{now_str()}] empty df | {symbol}", flush=True)
+            return
 
-    users = get_users_cached()
+        if len(df5) < 10 or len(df1h) < 20:
+            print(f"[{now_str()}] not enough candles | {symbol} | 5m={len(df5)} 1h={len(df1h)}", flush=True)
+            return
 
-    # 🚀 БАТЧ ЗАГРУЗКА
-    states = get_states_for_symbol(symbol)
+        users = get_users_cached()
+        states = get_states_for_symbol(symbol)
 
-    updates = []
-    queued = 0
+        updates = []
+        queued = 0
 
-    for user in users:
-        uid = user["telegram_id"]
-        trade_row = states.get(uid)
+        for user in users:
+            try:
+                uid = user["telegram_id"]
+                trade_row = states.get(uid)
 
-        signal, trade_state, snapshot = process_symbol_for_user(
-            df_scan=df5,
-            df_filter=df1h,
-            user=user,
-            trade_row=trade_row,
+                signal, trade_state, snapshot = process_symbol_for_user(
+                    df_scan=df5,
+                    df_filter=df1h,
+                    user=user,
+                    trade_row=trade_row,
+                )
+
+                updates.append({
+                    "telegram_id": uid,
+                    "symbol": symbol,
+                    "in_trade": int(trade_state.in_trade),
+                    "trade_dir": trade_state.trade_dir,
+                    "entry": trade_state.entry,
+                    "stop": trade_state.stop,
+                    "tp": trade_state.tp,
+                    "last_signature": trade_state.last_signature,
+                    "last_bar_marker": trade_state.last_bar_marker,
+                })
+
+                if not signal or not snapshot:
+                    continue
+
+                if not set_signal_lock(
+                    user_id=uid,
+                    symbol=symbol,
+                    side=signal.side,
+                    bar_marker=bar_marker,
+                    ttl_seconds=86400,
+                ):
+                    continue
+
+                text = format_signal_message(
+                    symbol=symbol,
+                    side=signal.side.upper(),
+                    entry=signal.entry,
+                    stop=signal.stop,
+                    tp=signal.tp,
+                    risk_pct=signal.risk_pct,
+                    user_settings=user,
+                )
+
+                enqueue_outbound_message(
+                    telegram_id=uid,
+                    symbol=symbol,
+                    side=signal.side.upper(),
+                    text=text,
+                    signal_key=f"{uid}|{symbol}|{signal.side}|{bar_marker}",
+                    created_at=utc_now(),
+                )
+
+                queued += 1
+
+            except Exception as e:
+                print(
+                    f"[{now_str()}] signal-worker user error | {symbol} | user={user.get('telegram_id')} | {e}",
+                    flush=True,
+                )
+
+        upsert_states_batch(updates)
+
+        elapsed = time.perf_counter() - start
+        print(
+            f"[{now_str()}] event processed | {symbol} | bar={bar_marker} | queued={queued} | took={elapsed:.3f}s",
+            flush=True,
         )
 
-        # собираем обновления
-        updates.append({
-            "telegram_id": uid,
-            "symbol": symbol,
-            "in_trade": int(trade_state.in_trade),
-            "trade_dir": trade_state.trade_dir,
-            "entry": trade_state.entry,
-            "stop": trade_state.stop,
-            "tp": trade_state.tp,
-            "last_signature": trade_state.last_signature,
-            "last_bar_marker": trade_state.last_bar_marker,
-        })
-
-        if not signal or not snapshot:
-            continue
-
-        if not set_signal_lock(uid, symbol, signal.side, bar_marker, 86400):
-            continue
-
-        text = format_signal_message(
-            symbol=symbol,
-            side=signal.side.upper(),
-            entry=signal.entry,
-            stop=signal.stop,
-            tp=signal.tp,
-            risk_pct=signal.risk_pct,
-            user_settings=user,
-        )
-
-        enqueue_outbound_message(
-            telegram_id=uid,
-            symbol=symbol,
-            side=signal.side.upper(),
-            text=text,
-            signal_key=f"{uid}|{symbol}|{signal.side}|{bar_marker}",
-            created_at=utc_now(),
-        )
-
-        queued += 1
-
-    # 🚀 ОДИН UPSERT ВМЕСТО СОТЕН
-    upsert_states_batch(updates)
-
-    elapsed = time.perf_counter() - start
-
-    print(
-        f"[{now_str()}] {symbol} | queued={queued} | took={elapsed:.2f}s",
-        flush=True,
-    )
+    except Exception as e:
+        print(f"[{now_str()}] process_bar_event fatal | {e}", flush=True)
 
 
-async def run_event(event, sem):
+async def run_event(event: dict, sem: asyncio.Semaphore):
     async with sem:
         await asyncio.to_thread(process_bar_event_sync, event)
 
 
-async def dispatcher(sem):
+async def dispatcher(sem: asyncio.Semaphore):
     while True:
-        event = await asyncio.to_thread(pop_bar_event_payload, BAR_EVENT_BLOCK_TIMEOUT)
+        try:
+            event = await asyncio.to_thread(
+                pop_bar_event_payload,
+                BAR_EVENT_BLOCK_TIMEOUT,
+            )
 
-        if not event:
-            await asyncio.sleep(0.01)
-            continue
+            if not event:
+                await asyncio.sleep(0.01)
+                continue
 
-        asyncio.create_task(run_event(event, sem))
+            asyncio.create_task(run_event(event, sem))
+
+        except Exception as e:
+            print(f"[{now_str()}] dispatcher error | {e}", flush=True)
+            await asyncio.sleep(0.1)
 
 
 async def main():
-    print("STARTED", flush=True)
+    print("signal_engine_worker.py started", flush=True)
     init_db()
 
-    print(f"shard={SIGNAL_SHARD_INDEX}", flush=True)
+    print(
+        f"[{now_str()}] signal shard | index={SIGNAL_SHARD_INDEX} count={SIGNAL_SHARD_COUNT}",
+        flush=True,
+    )
 
     sem = asyncio.Semaphore(20)
-
     await dispatcher(sem)
 
 
