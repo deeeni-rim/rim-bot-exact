@@ -132,8 +132,8 @@ def handle_kline_push(symbol: str, interval: str, data: dict):
                 "symbol": symbol,
                 "timeframe": "Min5",
                 "bar_marker": closed_bar_marker,
-                "candles_5m": updated[-80:],
-                "candles_1h": memory_1h.get(symbol, [])[-50:],
+                "candles_5m": updated[-30:]
+                "candles_1h": memory_1h.get(symbol, [])[-20:]
             }
             push_bar_event_payload(payload)
 
