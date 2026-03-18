@@ -46,3 +46,6 @@ DEFAULT_SETTINGS = {
     "structure_sensitivity": 3,
     "signals_enabled": True,
 }
+
+REDIS_CANDLE_TTL_SECONDS = int(os.getenv("REDIS_CANDLE_TTL_SECONDS", "21600"))  # 6 часов
+REDIS_EVENT_TTL_SECONDS = int(os.getenv("REDIS_EVENT_TTL_SECONDS", "3600"))    # 1 час
